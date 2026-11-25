@@ -1,0 +1,6 @@
+{
+  "name": "Journal Paper Dashboard",
+  "description": "One-screen academic manuscript tracking dashboard with AI page reading, status change highlighting, Gmail alerts, and an Edge, Chrome, and Firefox companion extension.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
