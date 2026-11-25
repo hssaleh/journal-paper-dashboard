@@ -6,7 +6,7 @@ One-screen academic manuscript tracking dashboard for Editorial Manager, Elsevie
 
 - **Unified Manuscript Table**: Tracks multiple linked portals per paper (e.g., Editorial Manager + Elsevier AuthorHub + Research Square) in one row, counting as OK whenever any linked source works.
 - **Built-in Local Reader + AI Agents**: Instant offline deterministic parser (`localSmartReader`), plus optional Free Open AI (Pollinations), Local Ollama, and Gemini AI (`GEMINI_API_KEY`).
-- **Companion Extension (`v1.2.4`)**: Downloadable directly from **Setup & Extension** inside the running app. Refreshes open, signed-in portal tabs while preserving Editorial Manager ASP.NET postback tables and waiting for AuthorHub SPA hydration. Never opens new browser tabs.
+- **Companion Extension (`v1.2.5`)**: Downloadable directly from **Setup & Extension** inside the running app. Refreshes open, signed-in portal tabs while preserving Editorial Manager ASP.NET postback tables and waiting for AuthorHub SPA hydration. Never opens new browser tabs.
 - **Data Safety & Export**: Preserves manually edited fields, tracks status-change history and unseen badges, supports JSON backup/merge import, and exports multi-sheet `.xlsx` workbooks.
 
 ## Local Development

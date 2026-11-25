@@ -4,12 +4,17 @@ import {
   signInWithPopup,
   GoogleAuthProvider,
   onAuthStateChanged,
+  type Auth,
   type User,
 } from 'firebase/auth';
-import { firebaseConfig } from './firebaseConfigFallback';
+import { firebaseConfig, isFirebaseConfigured } from './firebaseConfigFallback';
 
-const app = getApps().length ? getApps()[0] : initializeApp(firebaseConfig);
-const auth = getAuth(app);
+const app = isFirebaseConfigured
+  ? getApps().length
+    ? getApps()[0]
+    : initializeApp(firebaseConfig)
+  : null;
+const auth: Auth | null = app ? getAuth(app) : null;
 
 const provider = new GoogleAuthProvider();
 provider.addScope('https://www.googleapis.com/auth/gmail.send');
@@ -22,6 +27,12 @@ export function initGmailAuth(
   onAuthSuccess?: (user: User, token: string) => void,
   onAuthDisconnected?: (user: User | null) => void
 ) {
+  if (!auth) {
+    cachedAccessToken = null;
+    onAuthDisconnected?.(null);
+    return () => {};
+  }
+
   return onAuthStateChanged(auth, (user) => {
     if (user && cachedAccessToken) {
       onAuthSuccess?.(user, cachedAccessToken);
@@ -36,6 +47,12 @@ export async function signInWithGoogleForGmail(): Promise<{
   user: User;
   accessToken: string;
 }> {
+  if (!auth) {
+    throw new Error(
+      'Firebase is not configured for this host yet. Set VITE_FIREBASE_API_KEY, VITE_FIREBASE_AUTH_DOMAIN, VITE_FIREBASE_PROJECT_ID, and VITE_FIREBASE_APP_ID in your environment variables (or provision Firebase in AI Studio) to enable Google Sign-In.'
+    );
+  }
+
   try {
     isSigningIn = true;
     const result = await signInWithPopup(auth, provider);
@@ -51,6 +68,11 @@ export async function signInWithGoogleForGmail(): Promise<{
         ? String((err as { code?: unknown }).code || '')
         : '';
     const host = typeof window !== 'undefined' ? window.location.hostname : 'this domain';
+    if (code === 'auth/api-key-not-valid' || code === 'auth/invalid-api-key') {
+      throw new Error(
+        'Firebase API key is invalid or missing. Check your Firebase config or VITE_FIREBASE_API_KEY environment variable.'
+      );
+    }
     if (code === 'auth/unauthorized-domain') {
       throw new Error(
         `Domain "${host}" is not authorized for Google Sign-In. Add "${host}" in Firebase Console → Authentication → Settings → Authorized domains.`
@@ -73,7 +95,9 @@ export function getGmailAccessToken(): string | null {
 }
 
 export async function signOutGmail(): Promise<void> {
-  await auth.signOut();
+  if (auth) {
+    await auth.signOut();
+  }
   cachedAccessToken = null;
 }
 

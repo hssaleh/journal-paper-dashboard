@@ -418,11 +418,16 @@ async function startServer() {
       const origin =
         process.env.APP_URL ||
         `${req.protocol}://${req.get('host') || 'localhost:3000'}`;
-      const zipBuffer = await buildCrossBrowserExtensionZip(origin);
+      const ua = String(req.get('user-agent') || '');
+      const targetBrowser =
+        req.query.browser === 'firefox' || /Firefox\//i.test(ua)
+          ? 'firefox'
+          : 'chromium';
+      const zipBuffer = await buildCrossBrowserExtensionZip(origin, targetBrowser);
       res.setHeader('Content-Type', 'application/zip');
       res.setHeader(
         'Content-Disposition',
-        'attachment; filename="journal-paper-dashboard-extension.zip"'
+        `attachment; filename="journal-paper-dashboard-extension${targetBrowser === 'firefox' ? '-firefox' : ''}.zip"`
       );
       res.send(zipBuffer);
     } catch (err) {

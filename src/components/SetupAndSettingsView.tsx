@@ -183,10 +183,10 @@ export const SetupView: React.FC<SetupViewProps> = ({
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div>
             <h2 className="text-[18px] font-semibold text-slate-900 dark:text-slate-100">
-              Companion Browser Extension v1.2.4 (Edge, Chrome, Firefox)
+              Companion Browser Extension v1.2.5 (Edge, Chrome, Firefox)
             </h2>
             <p className="text-[14px] text-slate-600 dark:text-slate-400 mt-0.5">
-              Refreshes your already-open, signed-in portal tabs (Editorial Manager, Elsevier AuthorHub, Research Square) before reading text while preserving ASP.NET frames and waiting for AuthorHub SPAs. Supports Render (<span className="font-mono">*.onrender.com</span>), local dev, and Cloud Run hosts. Never opens any browser tabs. Re-download &amp; reload if updating from v1.2.3 or earlier.
+              Refreshes your already-open, signed-in portal tabs (Editorial Manager, Elsevier AuthorHub, Research Square) before reading text while preserving ASP.NET frames and waiting for AuthorHub SPAs. Uses clean Chromium MV3 <span className="font-mono">service_worker</span> for Edge &amp; Chrome (and automatic Firefox build when downloaded in Firefox). Never opens any browser tabs. Re-download &amp; reload if updating from v1.2.4 or earlier.
             </p>
           </div>
 
@@ -232,7 +232,17 @@ export const SetupView: React.FC<SetupViewProps> = ({
               3. Mozilla Firefox
             </h3>
             <ol className="list-decimal list-inside space-y-1.5 text-[13px] text-slate-700 dark:text-slate-300">
-              <li>Unzip the downloaded extension folder.</li>
+              <li>
+                Download and unzip the{' '}
+                <a
+                  href="/api/extension/download?browser=firefox"
+                  download="journal-paper-dashboard-extension-firefox.zip"
+                  className="underline font-medium text-blue-700 dark:text-blue-400"
+                >
+                  Firefox extension ZIP
+                </a>
+                .
+              </li>
               <li>Open <span className="font-mono">about:debugging#/runtime/this-firefox</span>.</li>
               <li>Click <strong>Load Temporary Add-on…</strong>.</li>
               <li>Select <span className="font-mono">manifest.json</span> inside the folder.</li>

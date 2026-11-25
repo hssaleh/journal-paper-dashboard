@@ -1,6 +1,9 @@
 import JSZip from 'jszip';
 
-export async function buildCrossBrowserExtensionZip(dashboardOrigin: string): Promise<Buffer> {
+export async function buildCrossBrowserExtensionZip(
+  dashboardOrigin: string,
+  targetBrowser: 'chromium' | 'firefox' = 'chromium'
+): Promise<Buffer> {
   const zip = new JSZip();
 
   let customOriginMatch: string | null = null;
@@ -25,18 +28,18 @@ export async function buildCrossBrowserExtensionZip(dashboardOrigin: string): Pr
     )
   );
 
-  const manifest = {
+  const manifest: Record<string, unknown> = {
     manifest_version: 3,
     name: 'Journal Paper Dashboard Companion',
-    version: '1.2.4',
+    version: '1.2.5',
     description:
       'Refreshes your open, signed-in journal tracker tabs (Editorial Manager, Elsevier AuthorHub, Research Square) in Edge, Chrome, and Firefox before reading page text. Never opens any tabs.',
     permissions: ['tabs', 'scripting', 'activeTab'],
     host_permissions: ['<all_urls>'],
-    background: {
-      service_worker: 'background.js',
-      scripts: ['background.js'],
-    },
+    background:
+      targetBrowser === 'firefox'
+        ? { scripts: ['background.js'] }
+        : { service_worker: 'background.js' },
     action: {
       default_title: 'Journal Paper Dashboard',
       default_popup: 'popup.html',
@@ -49,12 +52,16 @@ export async function buildCrossBrowserExtensionZip(dashboardOrigin: string): Pr
         all_frames: true,
       },
     ],
-    browser_specific_settings: {
-      gecko: {
-        id: 'journal-paper-dashboard@local.extension',
-        strict_min_version: '109.0',
-      },
-    },
+    ...(targetBrowser === 'firefox'
+      ? {
+          browser_specific_settings: {
+            gecko: {
+              id: 'journal-paper-dashboard@local.extension',
+              strict_min_version: '109.0',
+            },
+          },
+        }
+      : {}),
   };
 
   const backgroundJs = `const api = typeof browser !== 'undefined' ? browser : chrome;
@@ -430,7 +437,7 @@ api.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || !message.type) return;
 
   if (message.type === 'JPD_PING') {
-    sendResponse({ ok: true, version: '1.2.4' });
+    sendResponse({ ok: true, version: '1.2.5' });
     return true;
   }
 
@@ -459,7 +466,7 @@ api.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   const dashboardBridgeJs = `const api = typeof browser !== 'undefined' ? browser : chrome;
 
-window.postMessage({ type: 'JPD_EXTENSION_READY', version: '1.2.4' }, window.location.origin);
+window.postMessage({ type: 'JPD_EXTENSION_READY', version: '1.2.5' }, window.location.origin);
 
 try {
   api.runtime.onMessage.addListener((message) => {
@@ -481,7 +488,7 @@ window.addEventListener('message', (event) => {
         const lastErr = api.runtime?.lastError;
         if (lastErr || !resp?.ok) return;
         window.postMessage(
-          { type: 'JPD_EXTENSION_READY', version: resp.version || '1.2.4' },
+          { type: 'JPD_EXTENSION_READY', version: resp.version || '1.2.5' },
           window.location.origin
         );
       });
