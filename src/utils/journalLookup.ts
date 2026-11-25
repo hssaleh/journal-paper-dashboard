@@ -41,6 +41,15 @@ export const EDITORIAL_MANAGER_JOURNAL_CODES: Record<string, string> = {
   JMEMSCI: 'Journal of Membrane Science',
   SEPPUR: 'Separation and Purification Technology',
   IJGGC: 'International Journal of Greenhouse Gas Control',
+  ERSS: 'Energy Research & Social Science',
+  ECP: 'Energy Conversion and Management',
+  RESCONREC: 'Resources, Conservation and Recycling',
+  JHM: 'Journal of Hazardous Materials',
+  WASTE: 'Waste Management',
+  JEM: 'Journal of Environmental Management',
+  JES: 'Journal of Environmental Sciences',
+  CSCM: 'Case Studies in Construction Materials',
+  ENERGY: 'Energy',
 };
 
 const MONTH_NAME_PATTERN =
@@ -143,7 +152,7 @@ export function titlesMatchForMerge(
   if (na === nb) return true;
   const shorter = na.length <= nb.length ? na : nb;
   const longer = na.length > nb.length ? na : nb;
-  if (shorter.length >= 28 && longer.startsWith(shorter)) {
+  if (shorter.length >= 24 && longer.startsWith(shorter)) {
     return true;
   }
   return false;

@@ -79,7 +79,13 @@ export function validateExtractedResult(
         };
       }
       const normStatus = normalizeWhitespace(p.currentStatus);
-      if (normStatus.length > 0 && !normalizedPage.includes(normStatus)) {
+      const normPageAlphaNum = normalizedPage.replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ');
+      const normStatusAlphaNum = normStatus.replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
+      if (
+        normStatus.length > 0 &&
+        !normalizedPage.includes(normStatus) &&
+        !(normStatusAlphaNum && normPageAlphaNum.includes(normStatusAlphaNum))
+      ) {
         return {
           ok: false,
           pageState: 'ai_error',
@@ -427,32 +433,50 @@ function parseDateToken(raw: string): { iso: string | null; ambiguous: boolean }
 
 const KNOWN_STATUS_PHRASES = [
   'Submissions Being Processed',
+  'Submissions Being Processed for Author',
   'Submitted to Journal',
   'Manuscript Submitted',
+  'Manuscript Received',
+  'With Journal',
+  'Technical Check',
+  'Quality Check',
   'Initial Assessment',
   'Editorial Assessment',
   'With Editor',
   'Editor Assigned',
   'Editor Invited',
   'Under Review',
+  'Under Consideration',
   'Peer Review',
   'Reviewers Invited',
+  'Reviewers Assigned',
+  'Awaiting Reviewer Selection',
+  'Awaiting Reviewer Scores',
   'Required Reviews Completed',
   'Reviews Completed',
   'Review Complete',
+  'Completed',
+  'Complete',
+  'Awaiting Recommendation',
+  'Awaiting AE Recommendation',
+  'Awaiting EIC Decision',
   'Awaiting Editor Decision',
   'Decision in Process',
   'Ready for Decision',
   'Minor Revision Required',
   'Major Revision Required',
   'Revision Requested',
+  'Revise and Resubmit',
   'Minor Revision',
   'Major Revision',
   'Revise',
+  'Conditional Acceptance',
   'Accepted',
   'Accept',
+  'Ready for Production',
   'In Press',
   'In Production',
+  'Transfer Pending',
   'Rejected',
   'Declined',
   'Withdrawn',
@@ -546,6 +570,25 @@ export function extractWithLocalSmartReader(
     .map((l) => l.trim())
     .filter(Boolean);
 
+  // Detect Editorial Manager "Author Main Menu" hub page where manuscript rows are not shown yet
+  const hasAnyTableHeader = lines.some((l) => isTableHeaderLine(l).isHeader);
+  const hasManuscriptNumber = ACADEMIC_MS_REGEX.test(cleanedText);
+  if (
+    !hasAnyTableHeader &&
+    !hasManuscriptNumber &&
+    lower.includes('author main menu') &&
+    (lower.includes('submissions being processed') || lower.includes('submit new manuscript'))
+  ) {
+    return {
+      ok: false,
+      pageState: 'ai_error',
+      papers: [],
+      error:
+        'This tab is currently on the Editorial Manager Main Menu. Open "Submissions Being Processed" inside that portal tab, then refresh.',
+      technicalDetails: 'Author Main Menu navigation screen detected without manuscript rows.',
+    };
+  }
+
   // 1. Check for tabular multi-paper rows (separated by | or \t)
   const firstHeaderIdx = lines.findIndex((l) => isTableHeaderLine(l).isHeader);
 
@@ -556,9 +599,23 @@ export function extractWithLocalSmartReader(
         .split(sep)
         .map((h) => h.replace(/\s+/g, ' ').trim().toLowerCase());
       const papers: ExtractedPaper[] = [];
+      const seenRowKeys = new Set<string>();
 
       for (let i = firstHeaderIdx + 1; i < lines.length; i++) {
         const row = lines[i];
+        if (row === '--- PAGE TEXT ---' || row === '--- FRAME ---' || row === '--- TABLE ---') {
+          if (row === '--- PAGE TEXT ---' && papers.length > 0 && sep === '|') {
+            // Structured DOM table already extracted for this document/frame; skip duplicate innerText rows
+            while (
+              i + 1 < lines.length &&
+              lines[i + 1] !== '--- FRAME ---' &&
+              lines[i + 1] !== '--- TABLE ---'
+            ) {
+              i++;
+            }
+          }
+          continue;
+        }
         const headerCheck = isTableHeaderLine(row);
         if (headerCheck.isHeader && headerCheck.sep) {
           sep = headerCheck.sep;
@@ -673,6 +730,12 @@ export function extractWithLocalSmartReader(
                 sourceUrl,
                 manuscriptNumber,
               });
+
+        if (manuscriptNumber || title) {
+          const dedupKey = `${(manuscriptNumber || '').toUpperCase()}::${(revision || '').toUpperCase()}::${(title || '').toLowerCase().slice(0, 60)}`;
+          if (seenRowKeys.has(dedupKey)) continue;
+          seenRowKeys.add(dedupKey);
+        }
 
         papers.push({
           journalName: resolvedJournal,

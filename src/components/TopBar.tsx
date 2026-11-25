@@ -24,6 +24,7 @@ interface TopBarProps {
   hasPapers: boolean;
   aiProvider: AiProviderOption;
   onChangeAiProvider: (provider: AiProviderOption) => void;
+  geminiConfigured?: boolean | null;
 }
 
 export const TopBar: React.FC<TopBarProps> = ({
@@ -38,6 +39,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   hasPapers,
   aiProvider,
   onChangeAiProvider,
+  geminiConfigured,
 }) => {
   const navItems: Array<{ id: ActiveTab; label: string }> = [
     { id: 'papers', label: unseenCount > 0 ? `Papers (${unseenCount} new)` : 'Papers' },
@@ -101,11 +103,18 @@ export const TopBar: React.FC<TopBarProps> = ({
               aria-label="Select AI agent"
               value={aiProvider}
               onChange={(e) => onChangeAiProvider(e.target.value as AiProviderOption)}
+              title={
+                aiProvider === 'gemini' && geminiConfigured === false
+                  ? 'GEMINI_API_KEY is not set on the server — Local Reader fallback will be used until configured.'
+                  : undefined
+              }
               className="px-2.5 py-1.5 text-[13px] font-medium bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-lg text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-600"
             >
               {AI_AGENT_OPTIONS.map((opt) => (
                 <option key={opt.value} value={opt.value}>
-                  {opt.label}
+                  {opt.value === 'gemini' && geminiConfigured === false
+                    ? 'Gemini AI (Google — server key unset)'
+                    : opt.label}
                 </option>
               ))}
             </select>

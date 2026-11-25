@@ -3,9 +3,10 @@ import {
   AlertTriangle,
   ArrowDownToLine,
   ArrowUpToLine,
+  Check,
   CheckCircle2,
   Clock,
-  ExternalLink,
+  Copy,
   Eye,
   FileText,
   GripVertical,
@@ -23,6 +24,7 @@ import {
   computeDaysInStatus,
   formatDateOnly,
   formatRelativeTime,
+  getEffectivePaperHealth,
   getPaperSources,
   maskTrackingUrl,
   resolveStatusGroup,
@@ -154,6 +156,20 @@ export const PapersTable: React.FC<PapersTableProps> = ({
   const [draggedId, setDraggedId] = useState<string | null>(null);
   const [dragOverId, setDragOverId] = useState<string | null>(null);
   const [emptyInput, setEmptyInput] = useState('');
+  const [copiedPaperId, setCopiedPaperId] = useState<string | null>(null);
+
+  const handleCopyTrackerUrl = async (paper: PaperRecord) => {
+    if (!paper.url || paper.url === 'manual://entry') return;
+    try {
+      await navigator.clipboard.writeText(paper.url);
+      setCopiedPaperId(paper.id);
+      setTimeout(() => {
+        setCopiedPaperId((prev) => (prev === paper.id ? null : prev));
+      }, 1500);
+    } catch {
+      // Ignore clipboard permission errors silently
+    }
+  };
 
   const isCompact = settings.density === 'compact';
   const cellPad = isCompact ? 'py-2 px-2.5' : 'py-3 px-3';
@@ -377,15 +393,14 @@ export const PapersTable: React.FC<PapersTableProps> = ({
                               </span>
                             )}
                             {src.url && src.url !== 'manual://entry' ? (
-                              <a
-                                href={src.url}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                title={`${src.trackerSite}: ${src.currentStatus || 'OK'} (${src.health}) — ${maskTrackingUrl(src.url)}`}
-                                className={`hover:underline ${getSourceColorClass(src.trackerSite)}`}
+                              <button
+                                type="button"
+                                onClick={() => onOpenDetail(paper, 'details')}
+                                title={`${src.trackerSite}: ${src.currentStatus || 'OK'} (${src.health}) — ${maskTrackingUrl(src.url)} (click for details)`}
+                                className={`hover:underline focus:outline-none ${getSourceColorClass(src.trackerSite)}`}
                               >
                                 {src.trackerSite}
-                              </a>
+                              </button>
                             ) : (
                               <span className={getSourceColorClass(src.trackerSite)}>
                                 {src.trackerSite}
@@ -527,7 +542,7 @@ export const PapersTable: React.FC<PapersTableProps> = ({
                       onClick={() => onOpenDetail(paper, 'details')}
                       className="text-left hover:underline focus:outline-none"
                     >
-                      {renderHealthIndicator(paper.health, paper.healthMessage)}
+                      {renderHealthIndicator(getEffectivePaperHealth(paper), paper.healthMessage)}
                     </button>
                   </td>
 
@@ -545,15 +560,19 @@ export const PapersTable: React.FC<PapersTableProps> = ({
                       </button>
 
                       {paper.url && paper.url !== 'manual://entry' && (
-                        <a
-                          href={paper.url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          title="Open tracker page in browser"
+                        <button
+                          type="button"
+                          onClick={() => handleCopyTrackerUrl(paper)}
+                          title={copiedPaperId === paper.id ? 'Tracker link copied' : 'Copy tracker link'}
+                          aria-label={copiedPaperId === paper.id ? 'Tracker link copied' : 'Copy tracker link'}
                           className="p-1.5 rounded text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
                         >
-                          <ExternalLink className="w-4 h-4" />
-                        </a>
+                          {copiedPaperId === paper.id ? (
+                            <Check className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+                          ) : (
+                            <Copy className="w-4 h-4" />
+                          )}
+                        </button>
                       )}
 
                       <button

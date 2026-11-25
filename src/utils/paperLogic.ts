@@ -5,6 +5,7 @@ import type {
   DeletedPaperRecord,
   ExportBundle,
   ExtractedPaper,
+  HealthState,
   HistoryEntry,
   PaperRecord,
   PaperSourceLink,
@@ -314,6 +315,30 @@ export function getPaperSources(paper: PaperRecord): PaperSourceLink[] {
   ];
 }
 
+/**
+ * Row health rule:
+ * - Paused rows remain 'Paused'.
+ * - A paper with multiple linked portals counts as 'OK' if ANY linked source works (health === 'OK'),
+ *   or if warnings were explicitly cleared on the row (paper.health === 'OK').
+ */
+export function getEffectivePaperHealth(paper: PaperRecord): HealthState {
+  if (paper.paused) return 'Paused';
+  if (paper.health === 'OK') return 'OK';
+  const sources = getPaperSources(paper);
+  if (sources.some((s) => s.health === 'OK')) return 'OK';
+  return paper.health;
+}
+
+export function remapHistoryIds(
+  history: HistoryEntry[],
+  idRemap: Record<string, string>
+): HistoryEntry[] {
+  if (!idRemap || Object.keys(idRemap).length === 0) return history;
+  return history.map((h) =>
+    idRemap[h.paperId] ? { ...h, paperId: idRemap[h.paperId] } : h
+  );
+}
+
 export function normalizeSourceComparisonKey(url: string, trackerSite: string): string {
   const normUrl = stripUrlForComparison(url);
   try {
@@ -415,10 +440,10 @@ export function mergeTwoPaperRecords(primary: PaperRecord, incoming: PaperRecord
   }
 
   const healthySource = mergedSources.find((s) => s.health === 'OK');
-  const combinedHealth = healthySource
-    ? 'OK'
-    : primary.paused
+  const combinedHealth: HealthState = primary.paused
     ? 'Paused'
+    : healthySource || primary.health === 'OK' || incoming.health === 'OK'
+    ? 'OK'
     : primary.health;
 
   const latestCheckedMs = Math.max(

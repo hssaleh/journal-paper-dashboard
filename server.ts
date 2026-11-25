@@ -105,18 +105,22 @@ function encodeMimeEmail(to: string, subject: string, bodyText: string): string 
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT) || 3000;
 
+  app.set('trust proxy', 1);
   app.use(express.json({ limit: '4mb' }));
 
   // Health / AI diagnostic endpoint (never returns secret values)
   app.get('/api/health', (_req, res) => {
+    const geminiConfigured = Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim());
     res.json({
       ok: true,
       aiConfigured: true,
       freeProvidersReady: true,
-      geminiConfigured: Boolean(process.env.GEMINI_API_KEY),
-      model: 'Free Open AI (Pollinations) + Built-in Local Reader',
+      geminiConfigured,
+      model: geminiConfigured
+        ? 'Gemini AI + Free Open AI + Built-in Local Reader'
+        : 'Free Open AI (Pollinations) + Built-in Local Reader',
       serverTimeUtc: new Date().toISOString(),
     });
   });

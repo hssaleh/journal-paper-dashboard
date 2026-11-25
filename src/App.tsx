@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertTriangle,
   BarChart2,
   CheckCheck,
   ClipboardPaste,
@@ -21,6 +22,7 @@ import type {
   EmailAlertRecord,
   ExportBundle,
   ExtractedPaper,
+  ExtractionResponse,
   HealthState,
   HistoryEntry,
   PaperRecord,
@@ -36,14 +38,15 @@ import {
   formatDateTime,
   generateId,
   getCandidateKey,
+  getEffectivePaperHealth,
   getPaperSources,
   inferTrackerSite,
   isValidWebUrl,
   maskTrackingUrl,
   matchExtractedPaperToExisting,
   normalizeSourceComparisonKey,
+  remapHistoryIds,
   resolveStatusGroup,
-  stripUrlForComparison,
 } from './utils/paperLogic';
 import {
   isBadOrGenericJournalName,
@@ -57,6 +60,7 @@ import {
   extractPapersFromCapturedText,
   initExtensionBridge,
   subscribeExtensionStatus,
+  type PageCaptureResult,
 } from './services/extensionBridge';
 import {
   initGmailAuth,
@@ -129,7 +133,10 @@ export default function App() {
 
     const dedup = deduplicateAndMergePapers(cleaned);
     initialIdRemapRef.current = dedup.idRemap;
-    return dedup.merged;
+    return dedup.merged.map((p) => {
+      const eff = getEffectivePaperHealth(p);
+      return eff !== p.health ? { ...p, health: eff, healthMessage: eff === 'OK' ? null : p.healthMessage } : p;
+    });
   });
   const [deletedPapers, setDeletedPapers] = useState<DeletedPaperRecord[]>(() => {
     const items = loadJson<DeletedPaperRecord[]>(STORAGE_KEYS.deleted, []);
@@ -163,9 +170,21 @@ export default function App() {
     typeof navigator !== 'undefined' ? navigator.onLine : true
   );
   const [extensionConnected, setExtensionConnected] = useState(false);
+  const [geminiConfigured, setGeminiConfigured] = useState<boolean | null>(null);
   const [gmailConnected, setGmailConnected] = useState(false);
   const [gmailUserEmail, setGmailUserEmail] = useState<string | null>(null);
   const [isSigningInGmail, setIsSigningInGmail] = useState(false);
+
+  useEffect(() => {
+    void fetch('/api/health')
+      .then((r) => r.json())
+      .then((data: { geminiConfigured?: boolean }) => {
+        if (typeof data?.geminiConfigured === 'boolean') {
+          setGeminiConfigured(data.geminiConfigured);
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   // Reading / Refresh state
   const [urlInput, setUrlInput] = useState('');
@@ -339,15 +358,13 @@ export default function App() {
         });
 
         if (Object.keys(postRepairRemap).length > 0) {
-          setHistory((prev) =>
-            prev.map((h) =>
-              postRepairRemap[h.paperId] ? { ...h, paperId: postRepairRemap[h.paperId] } : h
-            )
-          );
+          setHistory((prev) => remapHistoryIds(prev, postRepairRemap));
         }
       }
     })();
-  }, [papers, rememberedIdentities]);
+    // Run once on initial mount using loaded papers
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Persist to localStorage
   useEffect(() => {
@@ -905,7 +922,11 @@ export default function App() {
     async (
       paperId: string,
       checkSource: 'manual' | 'scheduled' | 'test' = 'manual',
-      overrideUrl?: string
+      overrideUrl?: string,
+      sessionCache?: {
+        captures: Map<string, PageCaptureResult>;
+        extractions: Map<string, ExtractionResponse>;
+      }
     ) => {
       if (readingIdsRef.current.has(paperId)) return;
       const targetPaper = papers.find((p) => p.id === paperId);
@@ -998,7 +1019,15 @@ export default function App() {
         };
 
         for (const src of sourcesToRead) {
-          const capture = await captureTrackerPageText(src.url);
+          const cacheKey = normalizeSourceComparisonKey(src.url, src.trackerSite);
+          let capture = sessionCache?.captures.get(cacheKey);
+          if (!capture) {
+            capture = await captureTrackerPageText(src.url);
+            if (sessionCache) {
+              sessionCache.captures.set(cacheKey, capture);
+            }
+          }
+
           if (!capture.ok || !capture.text) {
             const health: HealthState =
               capture.code === 'NO_OPEN_TAB'
@@ -1019,12 +1048,18 @@ export default function App() {
             continue;
           }
 
-          const extraction = await extractPapersFromCapturedText({
-            pageText: capture.text,
-            sourceUrl: src.url,
-            pageTitle: capture.title,
-            provider: settings.aiProvider,
-          });
+          let extraction = sessionCache?.extractions.get(cacheKey);
+          if (!extraction) {
+            extraction = await extractPapersFromCapturedText({
+              pageText: capture.text,
+              sourceUrl: src.url,
+              pageTitle: capture.title,
+              provider: settings.aiProvider,
+            });
+            if (sessionCache && extraction.ok) {
+              sessionCache.extractions.set(cacheKey, extraction);
+            }
+          }
 
           if (!extraction.ok || extraction.pageState === 'ai_error') {
             recordSourceFailure(
@@ -1060,7 +1095,7 @@ export default function App() {
           }
 
           let matchedExt: ExtractedPaper | null = null;
-          if (extraction.papers.length === 1 && !src.sourceListUrl && !workingPaper.sourceListUrl) {
+          if (extraction.papers.length === 1 && !src.sourceListUrl) {
             matchedExt = extraction.papers[0];
           } else {
             for (const candidate of extraction.papers) {
@@ -1106,13 +1141,15 @@ export default function App() {
           }
         }
 
-        if (succeededCount === 0) {
+        const anyOtherSourceOk = getPaperSources(workingPaper).some((s) => s.health === 'OK');
+
+        if (succeededCount === 0 && !anyOtherSourceOk) {
           const nextFailures = workingPaper.consecutiveFailures + 1;
           const retryDelayMs =
             nextFailures === 1 ? 60000 : nextFailures === 2 ? 5 * 60000 : null;
           workingPaper = {
             ...workingPaper,
-            health: failureState.health,
+            health: workingPaper.paused ? 'Paused' : failureState.health,
             healthMessage: failureState.msg,
             healthTechnicalDetails: failureState.tech,
             consecutiveFailures: nextFailures,
@@ -1123,11 +1160,18 @@ export default function App() {
                 ? new Date(Date.now() + retryDelayMs).toISOString()
                 : null,
           };
+        } else if (succeededCount === 0 && anyOtherSourceOk) {
+          workingPaper = {
+            ...workingPaper,
+            health: workingPaper.paused ? 'Paused' : 'OK',
+            healthMessage: `A linked portal had an issue (${failureState.health}), while another linked source remains OK.`,
+            healthTechnicalDetails: failureState.tech,
+          };
         } else if (succeededCount < sourcesToRead.length) {
           workingPaper = {
             ...workingPaper,
             health: workingPaper.paused ? 'Paused' : 'OK',
-            healthMessage: `Updated ${succeededCount}/${sourcesToRead.length} linked portal(s). Some linked portal tabs could not be read (${failureState.msg}).`,
+            healthMessage: `Updated ${succeededCount}/${sourcesToRead.length} linked portal(s). Another linked portal could not be read (${failureState.msg}).`,
             healthTechnicalDetails: failureState.tech,
           };
         }
@@ -1437,9 +1481,14 @@ export default function App() {
       setIsRefreshingAll(true);
       setRefreshProgress({ done: 0, total: eligible.length });
 
+      const sessionCache = {
+        captures: new Map<string, PageCaptureResult>(),
+        extractions: new Map<string, ExtractionResponse>(),
+      };
+
       for (let i = 0; i < eligible.length; i++) {
         if (cancelRefreshAllRef.current) break;
-        await refreshSinglePaper(eligible[i].id, checkSource);
+        await refreshSinglePaper(eligible[i].id, checkSource, undefined, sessionCache);
         setRefreshProgress({ done: i + 1, total: eligible.length });
       }
 
@@ -1447,6 +1496,35 @@ export default function App() {
     },
     [isRefreshingAll, papers, refreshSinglePaper]
   );
+
+  const handleRecheckProblems = useCallback(async () => {
+    if (isRefreshingAll) return;
+    const failing = papers.filter((p) => {
+      if (p.paused || !p.url || p.url === 'manual://entry' || p.id.startsWith('reading-')) {
+        return false;
+      }
+      const eff = getEffectivePaperHealth(p);
+      return eff !== 'OK' && eff !== 'Paused';
+    });
+    if (failing.length === 0) return;
+
+    cancelRefreshAllRef.current = false;
+    setIsRefreshingAll(true);
+    setRefreshProgress({ done: 0, total: failing.length });
+
+    const sessionCache = {
+      captures: new Map<string, PageCaptureResult>(),
+      extractions: new Map<string, ExtractionResponse>(),
+    };
+
+    for (let i = 0; i < failing.length; i++) {
+      if (cancelRefreshAllRef.current) break;
+      await refreshSinglePaper(failing[i].id, 'manual', undefined, sessionCache);
+      setRefreshProgress({ done: i + 1, total: failing.length });
+    }
+
+    setIsRefreshingAll(false);
+  }, [isRefreshingAll, papers, refreshSinglePaper]);
 
   // Automatic scheduled checks while browser is open + retry failed reads (1m -> 5m)
   useEffect(() => {
@@ -1537,7 +1615,10 @@ export default function App() {
     const filtered = papers.filter((p) => {
       if (journalFilter !== 'all' && p.journalName !== journalFilter) return false;
       if (kpiFilter === 'changed' && !p.hasUnseenChange) return false;
-      if (kpiFilter === 'problems' && (p.health === 'OK' || p.health === 'Paused')) return false;
+      if (kpiFilter === 'problems') {
+        const eff = getEffectivePaperHealth(p);
+        if (eff === 'OK' || eff === 'Paused') return false;
+      }
       if (
         kpiFilter === 'submitted_editor' ||
         kpiFilter === 'under_review' ||
@@ -1576,6 +1657,96 @@ export default function App() {
     () => alerts.filter((a) => a.state === 'Failed' || a.state === 'Not delivered').length,
     [alerts]
   );
+  const problemCount = useMemo(
+    () =>
+      papers.filter((p) => {
+        const eff = getEffectivePaperHealth(p);
+        return eff !== 'OK' && eff !== 'Paused';
+      }).length,
+    [papers]
+  );
+
+  const handleClearAllProblems = useCallback(() => {
+    setPapers((prev) =>
+      prev.map((p) => {
+        const eff = getEffectivePaperHealth(p);
+        if (eff === 'OK' || eff === 'Paused') return p;
+        const clearedSources = getPaperSources(p).map((s) =>
+          s.health !== 'OK' && s.health !== 'Paused'
+            ? { ...s, health: 'OK' as HealthState, healthMessage: null, healthTechnicalDetails: null }
+            : s
+        );
+        return {
+          ...p,
+          health: 'OK',
+          healthMessage: null,
+          healthTechnicalDetails: null,
+          consecutiveFailures: 0,
+          nextRetryAt: null,
+          sources: clearedSources,
+        };
+      })
+    );
+    setBannerMessage({
+      type: 'success',
+      text: 'Cleared tracking health warnings and marked papers as OK.',
+    });
+  }, []);
+
+  const handleResetHealth = useCallback((paperId: string) => {
+    setPapers((prev) =>
+      prev.map((p) => {
+        if (p.id !== paperId) return p;
+        const clearedSources = getPaperSources(p).map((s) =>
+          s.health !== 'OK' && s.health !== 'Paused'
+            ? { ...s, health: 'OK' as HealthState, healthMessage: null, healthTechnicalDetails: null }
+            : s
+        );
+        return {
+          ...p,
+          health: 'OK',
+          healthMessage: null,
+          healthTechnicalDetails: null,
+          consecutiveFailures: 0,
+          nextRetryAt: null,
+          sources: clearedSources,
+        };
+      })
+    );
+    setBannerMessage({
+      type: 'success',
+      text: 'Marked paper health as OK.',
+    });
+  }, []);
+
+  const handleRemovePaperSource = useCallback((paperId: string, sourceId: string) => {
+    setPapers((prev) =>
+      prev.map((p) => {
+        if (p.id !== paperId) return p;
+        const existingSources = getPaperSources(p);
+        if (existingSources.length <= 1) return p;
+        const remaining = existingSources.filter((s) => s.id !== sourceId);
+        if (remaining.length === 0 || remaining.length === existingSources.length) return p;
+        const primarySrc = remaining[0];
+        const nextPaper: PaperRecord = {
+          ...p,
+          url: primarySrc.url,
+          trackerSite: primarySrc.trackerSite,
+          sources: remaining,
+        };
+        const effHealth = getEffectivePaperHealth(nextPaper);
+        return {
+          ...nextPaper,
+          health: effHealth,
+          healthMessage: effHealth === 'OK' ? null : primarySrc.healthMessage || p.healthMessage,
+        };
+      })
+    );
+    setBannerMessage({
+      type: 'info',
+      text: 'Removed linked portal source from paper.',
+    });
+  }, []);
 
   const activeDetailPaper = detailModal
     ? papers.find((p) => p.id === detailModal.paperId) || null
@@ -1637,7 +1808,7 @@ export default function App() {
     const merged = applyMergeImport(papers, history, bundle);
     const dedup = deduplicateAndMergePapers(merged.papers);
     setPapers(dedup.merged);
-    setHistory(merged.history);
+    setHistory(remapHistoryIds(merged.history, dedup.idRemap));
     setBannerMessage({
       type: 'success',
       text: 'Merge import complete. Existing records kept and newer updates applied.',
@@ -1658,7 +1829,7 @@ export default function App() {
     const dedup = deduplicateAndMergePapers(bundle.papers);
     setPapers(dedup.merged);
     setDeletedPapers(bundle.deletedPapers || []);
-    setHistory(bundle.history);
+    setHistory(remapHistoryIds(bundle.history, dedup.idRemap));
     if (bundle.settings) setSettings({ ...DEFAULT_SETTINGS, ...bundle.settings });
     if (bundle.rememberedIdentities) setRememberedIdentities(bundle.rememberedIdentities);
     setBannerMessage({
@@ -1712,6 +1883,7 @@ export default function App() {
         onChangeAiProvider={(provider) =>
           setSettings((s) => ({ ...s, aiProvider: provider }))
         }
+        geminiConfigured={geminiConfigured}
       />
 
       {!isOnline && (
@@ -1773,8 +1945,43 @@ export default function App() {
               onSelectFilter={setKpiFilter}
             />
 
+            {problemCount > 0 && (
+              <div className="bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 rounded-lg px-4 py-2.5 flex flex-wrap items-center justify-between gap-3 shrink-0">
+                <div className="flex items-center gap-2 text-[14px] text-amber-900 dark:text-amber-200">
+                  <AlertTriangle className="w-4 h-4 shrink-0 text-amber-600" />
+                  <span>
+                    <strong>{problemCount} tracking issue(s) detected</strong> across papers with no working portal read. Sign in to portals or recheck failed rows.
+                  </span>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={handleClearAllProblems}
+                    className="px-3 py-1 text-[13px] font-medium bg-white dark:bg-slate-900 border border-amber-300 dark:border-amber-700 text-amber-900 dark:text-amber-200 rounded-md hover:bg-amber-100 dark:hover:bg-slate-800"
+                  >
+                    Clear warnings / Mark OK
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isRefreshingAll}
+                    onClick={() => void handleRecheckProblems()}
+                    className="px-3 py-1 text-[13px] font-medium bg-amber-600 text-white rounded-md hover:bg-amber-700 disabled:opacity-50"
+                  >
+                    Recheck problems
+                  </button>
+                </div>
+              </div>
+            )}
+
             {settings.showGraphs && papers.length > 0 && (
-              <AnalyticsGraphs papers={papers} settings={settings} />
+              <AnalyticsGraphs
+                papers={papers}
+                settings={settings}
+                activeKpiFilter={kpiFilter}
+                activeJournalFilter={journalFilter}
+                onSelectStatusFilter={setKpiFilter}
+                onSelectJournalFilter={setJournalFilter}
+              />
             )}
 
             {/* Compact Workspace Toolbar (No separate large AI scan panel!) */}
@@ -1842,6 +2049,21 @@ export default function App() {
                   <option value="days_in_status">Days in status</option>
                   <option value="journal">Journal A–Z</option>
                 </select>
+
+                {(kpiFilter !== 'all' || journalFilter !== 'all' || searchQuery.trim() !== '') && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setKpiFilter('all');
+                      setJournalFilter('all');
+                      setSearchQuery('');
+                    }}
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 text-[13px] font-medium bg-blue-50 dark:bg-blue-950/40 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800 rounded-lg hover:bg-blue-100 dark:hover:bg-blue-950/60"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                    <span>Clear filters</span>
+                  </button>
+                )}
 
                 {unseenCount > 0 && (
                   <button
@@ -2056,7 +2278,7 @@ export default function App() {
                 const dedup = deduplicateAndMergePapers(parsed.papers);
                 setPapers(dedup.merged);
                 setDeletedPapers(parsed.deletedPapers || []);
-                setHistory(parsed.history || []);
+                setHistory(remapHistoryIds(parsed.history || [], dedup.idRemap));
                 if (parsed.settings) setSettings({ ...DEFAULT_SETTINGS, ...parsed.settings });
                 setBannerMessage({
                   type: 'success',
@@ -2252,6 +2474,11 @@ export default function App() {
               })
             );
           }}
+          onResetHealth={handleResetHealth}
+          onRefreshSource={(pId, srcUrl) => {
+            void refreshSinglePaper(pId, 'manual', srcUrl);
+          }}
+          onRemoveSource={handleRemovePaperSource}
         />
       )}
 

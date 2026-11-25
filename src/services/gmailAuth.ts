@@ -45,6 +45,24 @@ export async function signInWithGoogleForGmail(): Promise<{
     }
     cachedAccessToken = credential.accessToken;
     return { user: result.user, accessToken: cachedAccessToken };
+  } catch (err) {
+    const code =
+      typeof err === 'object' && err !== null && 'code' in err
+        ? String((err as { code?: unknown }).code || '')
+        : '';
+    const host = typeof window !== 'undefined' ? window.location.hostname : 'this domain';
+    if (code === 'auth/unauthorized-domain') {
+      throw new Error(
+        `Domain "${host}" is not authorized for Google Sign-In. Add "${host}" in Firebase Console → Authentication → Settings → Authorized domains.`
+      );
+    }
+    if (code === 'auth/popup-blocked') {
+      throw new Error('Sign-in popup was blocked by your browser. Allow popups for this site and try again.');
+    }
+    if (code === 'auth/popup-closed-by-user') {
+      throw new Error('Google sign-in popup was closed before completing.');
+    }
+    throw err;
   } finally {
     isSigningIn = false;
   }

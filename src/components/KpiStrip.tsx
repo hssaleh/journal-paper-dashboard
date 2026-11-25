@@ -1,6 +1,6 @@
 import React from 'react';
 import type { DashboardSettings, PaperRecord, StatusGroupKey } from '../types';
-import { formatRelativeTime, resolveStatusGroup } from '../utils/paperLogic';
+import { formatRelativeTime, getEffectivePaperHealth, resolveStatusGroup } from '../utils/paperLogic';
 
 export type KpiFilter =
   | 'all'
@@ -42,7 +42,8 @@ export const KpiStrip: React.FC<KpiStripProps> = ({
     const group = resolveStatusGroup(p.currentStatus, settings);
     counts[group.key]++;
     if (p.hasUnseenChange) changedCount++;
-    if (p.health !== 'OK' && p.health !== 'Paused') problemCount++;
+    const effectiveHealth = getEffectivePaperHealth(p);
+    if (effectiveHealth !== 'OK' && effectiveHealth !== 'Paused') problemCount++;
     if (p.lastCheckedAt) {
       if (!latestCheckIso || new Date(p.lastCheckedAt) > new Date(latestCheckIso)) {
         latestCheckIso = p.lastCheckedAt;
@@ -146,7 +147,9 @@ export const KpiStrip: React.FC<KpiStripProps> = ({
             }
             className={`px-3.5 py-2.5 text-left flex flex-col justify-between transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-600 ${
               isActive
-                ? 'bg-slate-100 dark:bg-slate-800/80'
+                ? item.id === 'all'
+                  ? 'bg-slate-100/90 dark:bg-slate-800/80'
+                  : 'bg-blue-50/75 dark:bg-blue-950/35 ring-1 ring-inset ring-blue-600/30 dark:ring-blue-500/40'
                 : 'hover:bg-slate-50 dark:hover:bg-slate-800/40'
             }`}
           >

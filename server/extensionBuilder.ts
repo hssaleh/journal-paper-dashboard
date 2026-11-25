@@ -3,12 +3,34 @@ import JSZip from 'jszip';
 export async function buildCrossBrowserExtensionZip(dashboardOrigin: string): Promise<Buffer> {
   const zip = new JSZip();
 
+  let customOriginMatch: string | null = null;
+  try {
+    const parsedOrigin = new URL(dashboardOrigin);
+    if (parsedOrigin.protocol === 'http:' || parsedOrigin.protocol === 'https:') {
+      customOriginMatch = `${parsedOrigin.origin}/*`;
+    }
+  } catch {
+    customOriginMatch = null;
+  }
+
+  const contentScriptMatches = Array.from(
+    new Set(
+      [
+        'http://localhost:3000/*',
+        'http://127.0.0.1:3000/*',
+        'https://*.run.app/*',
+        'https://*.onrender.com/*',
+        customOriginMatch,
+      ].filter((m): m is string => Boolean(m))
+    )
+  );
+
   const manifest = {
     manifest_version: 3,
     name: 'Journal Paper Dashboard Companion',
-    version: '1.1.1',
+    version: '1.2.1',
     description:
-      'Refreshes your open, signed-in journal tracker tabs (Editorial Manager, Elsevier AuthorHub, Research Square) in Edge, Chrome, and Firefox before reading page text. Never opens new portal tabs.',
+      'Refreshes your open, signed-in journal tracker tabs (Editorial Manager, Elsevier AuthorHub, Research Square) in Edge, Chrome, and Firefox before reading page text. Never opens any tabs.',
     permissions: ['tabs', 'scripting', 'activeTab'],
     host_permissions: ['<all_urls>'],
     background: {
@@ -21,11 +43,7 @@ export async function buildCrossBrowserExtensionZip(dashboardOrigin: string): Pr
     },
     content_scripts: [
       {
-        matches: [
-          'http://localhost:3000/*',
-          'http://127.0.0.1:3000/*',
-          'https://*.run.app/*',
-        ],
+        matches: contentScriptMatches,
         js: ['dashboard_bridge.js'],
         run_at: 'document_idle',
         all_frames: true,
@@ -210,7 +228,12 @@ async function extractTextFromTab(tabId) {
             if (rows.length < 2) return;
             const tableLines = [];
             rows.forEach((tr) => {
-              if (tr.querySelector('table')) return;
+              // Skip outer layout wrapper rows that hold another multi-row table,
+              // but keep manuscript rows that merely contain a small 1-row inline action/badge table.
+              const hasMultiRowNestedTable = Array.from(tr.querySelectorAll('table')).some(
+                (inner) => inner.querySelectorAll('tr').length > 1
+              );
+              if (hasMultiRowNestedTable) return;
               const cells = Array.from(tr.children).filter((c) => c.tagName === 'TD' || c.tagName === 'TH');
               if (cells.length >= 3) {
                 const line = cells.map((c) => (c.innerText || c.textContent || '').replace(/\\s+/g, ' ').trim()).join(' | ');
@@ -228,7 +251,7 @@ async function extractTextFromTab(tabId) {
           parts.push(cleanTables.join('\\n--- TABLE ---\\n'));
         }
         if (doc.body && doc.body.innerText) {
-          parts.push(doc.body.innerText);
+          parts.push('--- PAGE TEXT ---\\n' + doc.body.innerText);
         }
         const frames = doc.querySelectorAll('iframe, frame');
         frames.forEach((f) => {
@@ -277,7 +300,7 @@ api.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || !message.type) return;
 
   if (message.type === 'JPD_PING') {
-    sendResponse({ ok: true, version: '1.1.1' });
+    sendResponse({ ok: true, version: '1.2.1' });
     return true;
   }
 
@@ -306,7 +329,7 @@ api.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   const dashboardBridgeJs = `const api = typeof browser !== 'undefined' ? browser : chrome;
 
-window.postMessage({ type: 'JPD_EXTENSION_READY', version: '1.1.1' }, window.location.origin);
+window.postMessage({ type: 'JPD_EXTENSION_READY', version: '1.2.1' }, window.location.origin);
 
 api.runtime.onMessage.addListener((message) => {
   if (message && message.type === 'JPD_PUSH_TAB_CAPTURE' && message.payload) {
@@ -322,7 +345,7 @@ window.addEventListener('message', (event) => {
   if (msg.type === 'JPD_CHECK_EXTENSION') {
     api.runtime.sendMessage({ type: 'JPD_PING' }, (resp) => {
       window.postMessage(
-        { type: 'JPD_EXTENSION_READY', version: resp?.version || '1.1.1' },
+        { type: 'JPD_EXTENSION_READY', version: resp?.version || '1.2.1' },
         window.location.origin
       );
     });
@@ -359,9 +382,9 @@ window.addEventListener('message', (event) => {
 </head>
 <body>
   <h1>Journal Paper Dashboard</h1>
-  <p>Refreshes and reads visible text from your already-open portal tab. Never opens new portal tabs or sends passwords/cookies.</p>
+  <p>Refreshes and reads visible text from your already-open portal tab. Never opens any browser tabs or sends passwords/cookies.</p>
   <button id="sendTab" class="primary">Refresh &amp; Read This Tab</button>
-  <button id="openDash" class="secondary">Open / Focus Dashboard</button>
+  <button id="openDash" class="secondary">Focus Open Dashboard</button>
   <div id="status"></div>
   <script src="popup.js"></script>
 </body>
@@ -374,6 +397,7 @@ const DASHBOARD_URL = ${JSON.stringify(dashboardOrigin || 'http://localhost:3000
 function findDashboardTab(tabs) {
   return (
     tabs.find((t) => t.url && t.url.startsWith(DASHBOARD_URL)) ||
+    tabs.find((t) => t.url && t.url.includes('.onrender.com')) ||
     tabs.find((t) => t.url && (t.url.includes('localhost:3000') || t.url.includes('127.0.0.1:3000'))) ||
     tabs.find((t) => t.url && t.url.includes('.run.app')) ||
     tabs.find((t) => t.url && t.url.includes('aistudio.google.com/apps'))
@@ -398,11 +422,10 @@ document.getElementById('openDash').addEventListener('click', async () => {
       await focusTabAndWindow(dashTab);
       window.close();
     } else {
-      await api.tabs.create({ url: DASHBOARD_URL, active: true });
-      window.close();
+      statusEl.textContent = 'No open dashboard tab found. Open your Journal Paper Dashboard tab manually (this extension never opens tabs).';
     }
   } catch (err) {
-    statusEl.textContent = 'Could not open dashboard: ' + (err?.message || String(err));
+    statusEl.textContent = 'Could not locate dashboard tab: ' + (err?.message || String(err));
   }
 });
 
@@ -433,7 +456,7 @@ document.getElementById('sendTab').addEventListener('click', () => {
       await focusTabAndWindow(dashTab);
       statusEl.textContent = 'Sent refreshed page text to dashboard.';
     } else {
-      statusEl.textContent = 'No open dashboard tab found. Click "Open / Focus Dashboard" first.';
+      statusEl.textContent = 'No open dashboard tab found. Open your Journal Paper Dashboard tab manually, then try again.';
     }
   });
 });

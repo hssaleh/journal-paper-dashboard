@@ -25,6 +25,7 @@ import {
   TIMEZONE_OPTIONS,
   buildExportBundle,
   formatDateTime,
+  getEffectivePaperHealth,
   maskTrackingUrl,
   previewMergeImport,
   validateExportBundle,
@@ -71,21 +72,29 @@ export const SetupView: React.FC<SetupViewProps> = ({
         : 'Companion extension not detected in this tab. Public links and built-in sandbox pages still work; install the extension below to read signed-in portals.',
     });
 
-    // 2. AI Connection
+    // 2. AI Connection & Gemini Env Var Status
     try {
       const res = await fetch('/api/health');
       const data = (await res.json()) as {
         ok: boolean;
         aiConfigured: boolean;
         freeProvidersReady?: boolean;
+        geminiConfigured?: boolean;
         model: string;
       };
       rows.push({
         label: 'AI page reader connection',
         status: data.freeProvidersReady || data.aiConfigured ? 'pass' : 'fail',
         detail: data.freeProvidersReady
-          ? `Ready (${data.model}) — zero-config, completely free, no API key needed.`
+          ? `Ready (${data.model}) — Smart Local + Free Open AI works with zero keys.`
           : 'AI extraction endpoint is unavailable.',
+      });
+      rows.push({
+        label: 'Gemini AI (optional server key)',
+        status: data.geminiConfigured ? 'pass' : 'info',
+        detail: data.geminiConfigured
+          ? 'GEMINI_API_KEY is configured on the server. Gemini AI is ready.'
+          : 'GEMINI_API_KEY is not set on this server. Add GEMINI_API_KEY in Render Environment Variables to use Gemini AI, or keep Smart Local + Free Open AI active.',
       });
     } catch {
       rows.push({
@@ -96,23 +105,25 @@ export const SetupView: React.FC<SetupViewProps> = ({
     }
 
     // 3. Email connection
+    const currentHost = typeof window !== 'undefined' ? window.location.hostname : '';
     rows.push({
       label: 'Email alerts (Gmail to hssaleh@gmail.com)',
-      status: gmailConnected ? 'pass' : 'fail',
+      status: gmailConnected ? 'pass' : 'info',
       detail: gmailConnected
         ? 'Signed in with Google and ready to send status change emails.'
-        : 'Not signed in with Google yet. Go to History & Alerts and click "Sign in with Google".',
+        : `Not signed in with Google yet. Go to History & Alerts and click "Sign in with Google" (ensure "${currentHost}" is listed in Firebase Authorized Domains).`,
     });
 
     // 4. Each saved link
     for (const p of papers) {
+      const effHealth = getEffectivePaperHealth(p);
       rows.push({
         label: `Saved paper: ${p.journalName} (${p.manuscriptNumber || 'No MS #'})`,
-        status: p.health === 'OK' || p.health === 'Paused' ? 'pass' : 'fail',
+        status: effHealth === 'OK' || effHealth === 'Paused' ? 'pass' : 'fail',
         detail:
-          p.health === 'OK'
+          effHealth === 'OK'
             ? `Reachable (${maskTrackingUrl(p.url)}). Fields not shown on tracker are marked "Not shown", which is normal.`
-            : `${p.health}: ${p.healthMessage || 'Check page in browser'}`,
+            : `${effHealth}: ${p.healthMessage || 'Check page in browser'}`,
       });
     }
 
@@ -172,10 +183,10 @@ export const SetupView: React.FC<SetupViewProps> = ({
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div>
             <h2 className="text-[18px] font-semibold text-slate-900 dark:text-slate-100">
-              Companion Browser Extension v1.1 (Edge, Chrome, Firefox)
+              Companion Browser Extension v1.2.1 (Edge, Chrome, Firefox)
             </h2>
             <p className="text-[14px] text-slate-600 dark:text-slate-400 mt-0.5">
-              Refreshes your already-open, signed-in portal tabs (Editorial Manager, Elsevier AuthorHub, Research Square) before reading text. Never opens new tabs, and passwords/cookies never leave your PC. Re-download &amp; reload if updating from v1.0.
+              Refreshes your already-open, signed-in portal tabs (Editorial Manager, Elsevier AuthorHub, Research Square) before reading text. Supports Render (<span className="font-mono">*.onrender.com</span>), local dev, and Cloud Run hosts. Never opens any browser tabs (including portal or dashboard tabs). Re-download &amp; reload if updating from v1.2 or earlier.
             </p>
           </div>
 

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, AlertTriangle, RotateCcw, Trash2, Check } from 'lucide-react';
+import { X, AlertTriangle, RotateCcw, Trash2, Check, RefreshCw } from 'lucide-react';
 import type {
   AmbiguousMatchPrompt,
   DashboardSettings,
@@ -13,6 +13,8 @@ import {
   computeDaysSinceSubmission,
   formatDateOnly,
   formatDateTime,
+  formatRelativeTime,
+  getEffectivePaperHealth,
   getPaperSources,
   maskTrackingUrl,
 } from '../utils/paperLogic';
@@ -359,6 +361,9 @@ export const PaperDetailModal: React.FC<{
   onSaveEdits: (updated: PaperRecord) => void;
   onConfirmUncertainField: (paperId: string, field: string) => void;
   onTogglePause: (paperId: string) => void;
+  onResetHealth?: (paperId: string) => void;
+  onRefreshSource?: (paperId: string, sourceUrl: string) => void;
+  onRemoveSource?: (paperId: string, sourceId: string) => void;
 }> = ({
   paper,
   history,
@@ -368,6 +373,9 @@ export const PaperDetailModal: React.FC<{
   onSaveEdits,
   onConfirmUncertainField,
   onTogglePause,
+  onResetHealth,
+  onRefreshSource,
+  onRemoveSource,
 }) => {
   const [tab, setTab] = useState<'details' | 'edit' | 'history' | 'source'>(initialTab);
   const [showTechDetails, setShowTechDetails] = useState(false);
@@ -534,29 +542,40 @@ export const PaperDetailModal: React.FC<{
         <div className="overflow-y-auto p-5 flex-1 text-[14px]">
           {tab === 'details' && (
             <div className="space-y-5">
-              {paper.health !== 'OK' && (
-                <div className="p-3.5 rounded-lg bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800">
-                  <div className="font-semibold text-amber-900 dark:text-amber-200">
-                    Health: {paper.health}
-                  </div>
-                  <p className="text-[13px] text-amber-800 dark:text-amber-300 mt-1">
-                    {paper.healthMessage || 'Check the tracker page in your browser.'}
-                  </p>
-                  {paper.healthTechnicalDetails && (
-                    <div className="mt-2">
-                      <button
-                        type="button"
-                        onClick={() => setShowTechDetails((v) => !v)}
-                        className="text-[12px] underline text-amber-900 dark:text-amber-300"
-                      >
-                        {showTechDetails ? 'Hide details' : 'Technical details'}
-                      </button>
-                      {showTechDetails && (
-                        <pre className="mt-1.5 p-2 rounded bg-white/80 dark:bg-slate-950 text-[12px] font-mono overflow-x-auto">
-                          {paper.healthTechnicalDetails}
-                        </pre>
-                      )}
+              {getEffectivePaperHealth(paper) !== 'OK' && (
+                <div className="p-3.5 rounded-lg bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 flex items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="font-semibold text-amber-900 dark:text-amber-200">
+                      Health: {getEffectivePaperHealth(paper)}
                     </div>
+                    <p className="text-[13px] text-amber-800 dark:text-amber-300 mt-1">
+                      {paper.healthMessage || 'Check the tracker page in your browser.'}
+                    </p>
+                    {paper.healthTechnicalDetails && (
+                      <div className="mt-2">
+                        <button
+                          type="button"
+                          onClick={() => setShowTechDetails((v) => !v)}
+                          className="text-[12px] underline text-amber-900 dark:text-amber-300"
+                        >
+                          {showTechDetails ? 'Hide details' : 'Technical details'}
+                        </button>
+                        {showTechDetails && (
+                          <pre className="mt-1.5 p-2 rounded bg-white/80 dark:bg-slate-950 text-[12px] font-mono overflow-x-auto">
+                            {paper.healthTechnicalDetails}
+                          </pre>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  {onResetHealth && (
+                    <button
+                      type="button"
+                      onClick={() => onResetHealth(paper.id)}
+                      className="px-3 py-1.5 text-[13px] font-medium bg-white dark:bg-slate-900 border border-amber-300 dark:border-amber-700 text-amber-900 dark:text-amber-200 rounded-md hover:bg-amber-100 dark:hover:bg-slate-800 shrink-0"
+                    >
+                      Mark OK / Dismiss
+                    </button>
                   )}
                 </div>
               )}
@@ -732,10 +751,10 @@ export const PaperDetailModal: React.FC<{
                   Tracked portal sources ({getPaperSources(paper).length})
                 </h3>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                  {getPaperSources(paper).map((src) => (
+                  {getPaperSources(paper).map((src, _idx, allSources) => (
                     <div
                       key={src.id}
-                      className="p-3 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 text-[13px] space-y-1"
+                      className="p-3 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 text-[13px] space-y-1.5"
                     >
                       <div className="flex items-center justify-between gap-2">
                         <span className="font-semibold text-slate-900 dark:text-slate-100">
@@ -758,9 +777,38 @@ export const PaperDetailModal: React.FC<{
                       <div className="text-[12px] font-mono text-slate-500 dark:text-slate-400 truncate">
                         {maskTrackingUrl(src.url)}
                       </div>
+                      {src.lastSuccessfulReadAt && (
+                        <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                          Last read: {formatRelativeTime(src.lastSuccessfulReadAt)}
+                        </div>
+                      )}
                       {src.healthMessage && src.health !== 'OK' && (
                         <div className="text-[12px] text-amber-700 dark:text-amber-400">
                           {src.healthMessage}
+                        </div>
+                      )}
+                      {(onRefreshSource || (onRemoveSource && allSources.length > 1)) && (
+                        <div className="flex items-center gap-2 pt-1">
+                          {onRefreshSource && src.url && src.url !== 'manual://entry' && (
+                            <button
+                              type="button"
+                              onClick={() => onRefreshSource(paper.id, src.url)}
+                              className="inline-flex items-center gap-1 px-2.5 py-1 text-[12px] font-medium bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200"
+                            >
+                              <RefreshCw className="w-3 h-3" />
+                              Refresh source
+                            </button>
+                          )}
+                          {onRemoveSource && allSources.length > 1 && (
+                            <button
+                              type="button"
+                              onClick={() => onRemoveSource(paper.id, src.id)}
+                              className="inline-flex items-center gap-1 px-2.5 py-1 text-[12px] font-medium bg-white dark:bg-slate-900 border border-rose-200 dark:border-rose-900 rounded hover:bg-rose-50 dark:hover:bg-rose-950/30 text-rose-700 dark:text-rose-400"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                              Remove
+                            </button>
+                          )}
                         </div>
                       )}
                     </div>
