@@ -1,4 +1,8 @@
 import type { ExtractionResponse } from '../types';
+import {
+  extractWithLocalSmartReader,
+  validateExtractedResult,
+} from '../utils/localSmartReader';
 
 export interface PageCaptureResult {
   ok: boolean;
@@ -55,7 +59,7 @@ export interface CaptureHints {
 
 function readViaExtension(
   url: string,
-  timeoutMs = 26000,
+  timeoutMs = 35000,
   hints?: CaptureHints
 ): Promise<PageCaptureResult> {
   return new Promise((resolve) => {
@@ -125,7 +129,7 @@ export async function captureTrackerPageText(
   if (extensionDetected && !isLocalTest) {
     const extResult = await readViaExtension(
       rawUrl,
-      Math.max(timeoutMs + 14000, 26000),
+      Math.max(timeoutMs + 23000, 35000),
       hints
     );
     if (extResult.ok) return extResult;
@@ -153,12 +157,86 @@ export async function captureTrackerPageText(
   }
 }
 
+async function tryBrowserLocalOllama(params: {
+  pageText: string;
+  sourceUrl: string;
+  pageTitle?: string;
+}): Promise<ExtractionResponse | null> {
+  const cleaned = (params.pageText || '').trim();
+  if (cleaned.length < 15) return null;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 6000);
+  const safeUrl = params.sourceUrl.split('?')[0] || 'unknown';
+
+  try {
+    const res = await fetch('http://127.0.0.1:11434/api/chat', {
+      method: 'POST',
+      signal: controller.signal,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'llama3.2',
+        stream: false,
+        format: 'json',
+        messages: [
+          {
+            role: 'system',
+            content:
+              'Extract academic manuscript status JSON: {"pageState":"ok"|"sign_in_needed"|"not_found"|"empty_or_unreadable","papers":[{"journalName":string|null,"title":string|null,"manuscriptNumber":string|null,"revision":string|null,"submissionDate":"YYYY-MM-DD"|null,"currentStatus":string|null,"statusDate":"YYYY-MM-DD"|null}]}. Use exact status text from the page.',
+          },
+          {
+            role: 'user',
+            content: `Source: ${safeUrl}\nPage title: ${params.pageTitle || 'Unknown'}\n\n${cleaned.slice(0, 18000)}`,
+          },
+        ],
+      }),
+    });
+    clearTimeout(timer);
+    if (!res.ok) return null;
+
+    const data = (await res.json()) as { message?: { content?: string } };
+    const raw = (data?.message?.content || '').trim();
+    const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    const candidate = fenced ? fenced[1].trim() : raw;
+    const firstBrace = candidate.indexOf('{');
+    const lastBrace = candidate.lastIndexOf('}');
+    const sliced =
+      firstBrace !== -1 && lastBrace > firstBrace
+        ? candidate.slice(firstBrace, lastBrace + 1)
+        : candidate;
+    const parsed = JSON.parse(sliced) as { pageState?: string; papers?: Record<string, unknown>[] };
+    const validated = validateExtractedResult(parsed, cleaned, {
+      sourceUrl: params.sourceUrl,
+      pageTitle: params.pageTitle,
+    });
+    return validated.ok ? validated : null;
+  } catch {
+    clearTimeout(timer);
+    return null;
+  }
+}
+
 export async function extractPapersFromCapturedText(params: {
   pageText: string;
   sourceUrl: string;
   pageTitle?: string;
   provider?: string;
 }): Promise<ExtractionResponse> {
+  // 1. Built-in Local Reader (Offline): runs 100% locally in the browser with zero network dependency
+  if (params.provider === 'local_reader') {
+    return extractWithLocalSmartReader(
+      params.pageText,
+      params.sourceUrl,
+      params.pageTitle
+    );
+  }
+
+  // 2. Local Ollama: try direct localhost Ollama from the user's browser first (works even on Render/cloud hosting)
+  if (params.provider === 'ollama') {
+    const directOllama = await tryBrowserLocalOllama(params);
+    if (directOllama) return directOllama;
+  }
+
   try {
     const res = await fetch('/api/extract', {
       method: 'POST',
@@ -167,8 +245,23 @@ export async function extractPapersFromCapturedText(params: {
     });
     const raw = await res.text();
     try {
-      return JSON.parse(raw) as ExtractionResponse;
+      const parsed = JSON.parse(raw) as ExtractionResponse;
+      if (parsed.ok) return parsed;
+      // Last-chance local smart reader fallback if server AI returned an error on recognizable text
+      const localCheck = extractWithLocalSmartReader(
+        params.pageText,
+        params.sourceUrl,
+        params.pageTitle
+      );
+      if (localCheck.ok) return localCheck;
+      return parsed;
     } catch {
+      const localCheck = extractWithLocalSmartReader(
+        params.pageText,
+        params.sourceUrl,
+        params.pageTitle
+      );
+      if (localCheck.ok) return localCheck;
       return {
         ok: false,
         pageState: 'ai_error',
@@ -178,6 +271,14 @@ export async function extractPapersFromCapturedText(params: {
       };
     }
   } catch (err) {
+    // Offline or server unavailable: fall back seamlessly to browser-side Built-in Local Reader
+    const localFallback = extractWithLocalSmartReader(
+      params.pageText,
+      params.sourceUrl,
+      params.pageTitle
+    );
+    if (localFallback.ok) return localFallback;
+
     return {
       ok: false,
       pageState: 'ai_error',

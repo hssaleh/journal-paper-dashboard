@@ -1,4 +1,4 @@
-import { GoogleGenAI, Type, ThinkingLevel } from '@google/genai';
+import { GoogleGenAI, Type } from '@google/genai';
 import type { ExtractedPaper, ExtractionResponse } from '../src/types.ts';
 import {
   isBadOrGenericJournalName,
@@ -126,9 +126,6 @@ ${boundedText}
             : `${prompt}\n\nReturn ONLY a JSON object with shape: {"pageState":"ok"|"sign_in_needed"|"not_found"|"empty_or_unreadable","papers":[{"journalName":string|null,"title":string|null,"manuscriptNumber":string|null,"revision":string|null,"submissionType":string|null,"submissionDate":string|null,"submissionDateAmbiguous":boolean,"currentStatus":string|null,"statusDate":string|null,"statusDateAmbiguous":boolean,"editorOrTeam":string|null,"reviewCount":number|null,"decision":string|null,"uncertainFields":string[],"pageEventHistory":[]}]}`,
           config: {
             systemInstruction,
-            ...(modelName === 'gemini-4-hydrogen'
-              ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
-              : {}),
             responseMimeType: 'application/json',
             ...(useSchema
               ? {
@@ -207,12 +204,17 @@ ${boundedText}
         const isTransient =
           !isQuotaOrAuth &&
           (msg.includes('503') ||
+            msg.includes('500') ||
             msg.includes('UNAVAILABLE') ||
+            msg.includes('INTERNAL') ||
+            msg.includes('DEADLINE_EXCEEDED') ||
             msg.includes('400') ||
             msg.includes('404') ||
             msg.includes('NOT_FOUND') ||
             msg.toLowerCase().includes('not found') ||
-            msg.toLowerCase().includes('not supported'));
+            msg.toLowerCase().includes('not supported') ||
+            msg.toLowerCase().includes('timeout') ||
+            msg.toLowerCase().includes('fetch failed'));
         if (!isTransient || i === attempts.length - 1) {
           throw new Error(attemptErrors.join(' | '));
         }
@@ -230,7 +232,16 @@ ${boundedText}
       };
     }
 
-    const parsed = JSON.parse(rawJson) as {
+    const fenced = rawJson.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    const jsonCandidate = fenced ? fenced[1].trim() : rawJson;
+    const firstBrace = jsonCandidate.indexOf('{');
+    const lastBrace = jsonCandidate.lastIndexOf('}');
+    const jsonSlice =
+      firstBrace !== -1 && lastBrace > firstBrace
+        ? jsonCandidate.slice(firstBrace, lastBrace + 1)
+        : jsonCandidate;
+
+    const parsed = JSON.parse(jsonSlice) as {
       pageState?: string;
       papers?: ExtractedPaper[];
     };

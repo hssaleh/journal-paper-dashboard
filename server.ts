@@ -284,7 +284,8 @@ async function startServer() {
       if (!localRes.ok) return null;
       if (localRes.pageState !== 'ok') return localRes;
       const usable = localRes.papers.filter(hasUsablePaper);
-      return usable.length > 0 ? { ...localRes, papers: usable } : null;
+      if (usable.length > 0) return { ...localRes, papers: usable };
+      return localRes.papers.length > 0 ? localRes : null;
     };
 
     if (provider === 'gemini') {

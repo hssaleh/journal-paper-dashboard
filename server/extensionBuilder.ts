@@ -28,7 +28,7 @@ export async function buildCrossBrowserExtensionZip(dashboardOrigin: string): Pr
   const manifest = {
     manifest_version: 3,
     name: 'Journal Paper Dashboard Companion',
-    version: '1.2.2',
+    version: '1.2.3',
     description:
       'Refreshes your open, signed-in journal tracker tabs (Editorial Manager, Elsevier AuthorHub, Research Square) in Edge, Chrome, and Firefox before reading page text. Never opens any tabs.',
     permissions: ['tabs', 'scripting', 'activeTab'],
@@ -188,22 +188,25 @@ function findAllMatchingOpenTabs(allTabs, targetUrl) {
 
 async function extractTextFromTab(tabId) {
   const results = await api.scripting.executeScript({
-    target: { tabId },
+    target: { tabId, allFrames: true },
     func: () => {
       const parts = [];
       const bannerHints = [];
+      const isTop = window === window.top;
 
-      const metaSelectors = [
-        'meta[name="citation_journal_title"]',
-        'meta[property="og:site_name"]',
-      ];
-      metaSelectors.forEach((sel) => {
-        const el = document.querySelector(sel);
-        const content = el && el.getAttribute('content');
-        if (content && content.trim() && !/\\b(logo|non solus|elsevier|authorhub)\\b/i.test(content)) {
-          bannerHints.push(content.trim());
-        }
-      });
+      if (isTop) {
+        const metaSelectors = [
+          'meta[name="citation_journal_title"]',
+          'meta[property="og:site_name"]',
+        ];
+        metaSelectors.forEach((sel) => {
+          const el = document.querySelector(sel);
+          const content = el && el.getAttribute('content');
+          if (content && content.trim() && !/\\b(logo|non solus|elsevier|authorhub)\\b/i.test(content)) {
+            bannerHints.push(content.trim());
+          }
+        });
+      }
 
       document.querySelectorAll('img[alt]').forEach((img) => {
         const alt = (img.getAttribute('alt') || '').replace(/\\s+/g, ' ').trim();
@@ -217,90 +220,91 @@ async function extractTextFromTab(tabId) {
         }
       });
 
-      if (document.title) {
+      if (isTop && document.title) {
         parts.push('Page Title: ' + document.title.trim());
       }
       if (bannerHints.length > 0) {
         parts.push('Journal Banner: ' + bannerHints.slice(0, 3).join(' | '));
       }
 
+      const ignoredHeadingPattern =
+        /^(track your submission|track your accepted|authorhub|editorial manager|research square|submissions being processed|revisions being processed|author main menu|timeline|submission details|details of your submission|submission overview|peer review|review timeline|recent activity|activity log|manuscript details|article details)/i;
+
       const h1 = document.querySelector('h1');
       if (h1 && h1.innerText) {
         const h1Text = h1.innerText.replace(/\\s+/g, ' ').trim();
-        if (h1Text.length >= 8 && !/^(track your submission|authorhub|editorial manager|research square|submissions being processed)/i.test(h1Text)) {
+        if (h1Text.length >= 8 && !ignoredHeadingPattern.test(h1Text)) {
           parts.push('Heading 1: ' + h1Text);
         }
       }
       const h2 = document.querySelector('h2');
       if (h2 && h2.innerText) {
         const h2Text = h2.innerText.replace(/\\s+/g, ' ').trim();
-        if (h2Text.length >= 8 && !/^(track your submission|authorhub|editorial manager|research square|submissions being processed|timeline|submission details)/i.test(h2Text)) {
+        if (h2Text.length >= 8 && !ignoredHeadingPattern.test(h2Text)) {
           parts.push('Heading 2: ' + h2Text);
         }
       }
 
-      function collectDoc(doc, depth = 0) {
-        if (!doc || depth > 3) return;
-        const cleanTables = [];
-        try {
-          doc.querySelectorAll('table').forEach((tbl) => {
-            const rows = Array.from(tbl.querySelectorAll(':scope > tbody > tr, :scope > thead > tr, :scope > tr'));
-            if (rows.length < 2) return;
-            const tableLines = [];
-            rows.forEach((tr) => {
-              // Skip outer layout wrapper rows that hold another multi-row DATA table,
-              // but keep manuscript rows whose Action cell contains a small 1-2 col helper table.
-              const hasMultiRowDataNestedTable = Array.from(tr.querySelectorAll('table')).some((inner) => {
-                const innerRows = inner.querySelectorAll('tr');
-                if (innerRows.length <= 1) return false;
-                const hasWideRow = Array.from(innerRows).some(
-                  (r) => Array.from(r.children).filter((c) => c.tagName === 'TD' || c.tagName === 'TH').length >= 3
-                );
-                const innerTxt = (inner.innerText || '').toLowerCase();
-                return hasWideRow || /manuscript\\s*number|current\\s*status|initial\\s*date/.test(innerTxt);
-              });
-              if (hasMultiRowDataNestedTable) return;
-              const cells = Array.from(tr.children).filter((c) => c.tagName === 'TD' || c.tagName === 'TH');
-              if (cells.length >= 2) {
-                const line = cells.map((c) => (c.innerText || c.textContent || '').replace(/\\s+/g, ' ').trim()).join(' | ');
-                if (line.replace(/[|\\s]/g, '').length > 0) tableLines.push(line);
-              }
+      const cleanTables = [];
+      try {
+        document.querySelectorAll('table').forEach((tbl) => {
+          const rows = Array.from(tbl.querySelectorAll(':scope > tbody > tr, :scope > thead > tr, :scope > tr'));
+          if (rows.length < 2) return;
+          const tableLines = [];
+          rows.forEach((tr) => {
+            const hasMultiRowDataNestedTable = Array.from(tr.querySelectorAll('table')).some((inner) => {
+              const innerRows = inner.querySelectorAll('tr');
+              if (innerRows.length <= 1) return false;
+              const hasWideRow = Array.from(innerRows).some(
+                (r) => Array.from(r.children).filter((c) => c.tagName === 'TD' || c.tagName === 'TH').length >= 3
+              );
+              const innerTxt = (inner.innerText || '').toLowerCase();
+              return hasWideRow || /manuscript\\s*number|current\\s*status|initial\\s*date/.test(innerTxt);
             });
-            const joined = tableLines.join('\\n');
-            if (/manuscript|title|status/i.test(joined)) {
-              cleanTables.push(joined);
+            if (hasMultiRowDataNestedTable) return;
+            const cells = Array.from(tr.children).filter((c) => c.tagName === 'TD' || c.tagName === 'TH');
+            if (cells.length >= 2) {
+              const line = cells.map((c) => (c.innerText || c.textContent || '').replace(/\\s+/g, ' ').trim()).join(' | ');
+              if (line.replace(/[|\\s]/g, '').length > 0) tableLines.push(line);
             }
           });
-        } catch (_) {}
-
-        if (cleanTables.length > 0) {
-          parts.push(cleanTables.join('\\n--- TABLE ---\\n'));
-        }
-        if (doc.body && doc.body.innerText) {
-          parts.push('--- PAGE TEXT ---\\n' + doc.body.innerText);
-        }
-        const frames = doc.querySelectorAll('iframe, frame');
-        frames.forEach((f) => {
-          try {
-            if (f.contentDocument) collectDoc(f.contentDocument, depth + 1);
-          } catch (_) {
-            // Cross-origin frame ignored safely
+          const joined = tableLines.join('\\n');
+          if (/manuscript|title|status/i.test(joined)) {
+            cleanTables.push(joined);
           }
         });
+      } catch (_) {}
+
+      if (cleanTables.length > 0) {
+        parts.push(cleanTables.join('\\n--- TABLE ---\\n'));
       }
-      collectDoc(document);
+      if (document.body && document.body.innerText && document.body.innerText.trim().length > 0) {
+        parts.push('--- PAGE TEXT ---\\n' + document.body.innerText);
+      }
       return {
+        isTop,
         text: parts.join('\\n--- FRAME ---\\n'),
-        title: document.title || '',
-        url: window.location.href,
+        title: isTop ? (document.title || '') : '',
+        url: isTop ? window.location.href : '',
       };
     },
   });
 
-  if (!results || !results[0] || !results[0].result) {
+  if (!results || results.length === 0) {
     throw new Error('Could not read page text from tab');
   }
-  return results[0].result;
+  const frameTexts = results
+    .map((r) => r?.result)
+    .filter((r) => r && r.text && r.text.trim().length > 0);
+  if (frameTexts.length === 0) {
+    throw new Error('Could not read page text from tab');
+  }
+  const topFrame = frameTexts.find((f) => f.isTop) || frameTexts[0];
+  return {
+    text: frameTexts.map((f) => f.text).join('\\n--- FRAME ---\\n'),
+    title: topFrame.title || '',
+    url: topFrame.url || '',
+  };
 }
 
 async function extractAfterSpaSettle(tabId) {
@@ -310,7 +314,8 @@ async function extractAfterSpaSettle(tabId) {
     const trimmedBody = bodyOnly.trim();
     const stillLoading =
       trimmedBody.length < 180 ||
-      /^(?:loading|please wait|fetching)/i.test(trimmedBody);
+      (/^(?:loading|please wait|fetching)/i.test(trimmedBody) ||
+        (/\\bloading\\b|\\bfetching\\b/i.test(trimmedBody) && trimmedBody.length < 600));
     if (!stillLoading) break;
     await sleep(900);
     data = await extractTextFromTab(tabId);
@@ -364,7 +369,7 @@ api.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || !message.type) return;
 
   if (message.type === 'JPD_PING') {
-    sendResponse({ ok: true, version: '1.2.2' });
+    sendResponse({ ok: true, version: '1.2.3' });
     return true;
   }
 
@@ -393,7 +398,7 @@ api.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   const dashboardBridgeJs = `const api = typeof browser !== 'undefined' ? browser : chrome;
 
-window.postMessage({ type: 'JPD_EXTENSION_READY', version: '1.2.2' }, window.location.origin);
+window.postMessage({ type: 'JPD_EXTENSION_READY', version: '1.2.3' }, window.location.origin);
 
 api.runtime.onMessage.addListener((message) => {
   if (message && message.type === 'JPD_PUSH_TAB_CAPTURE' && message.payload) {
