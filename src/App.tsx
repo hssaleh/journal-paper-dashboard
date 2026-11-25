@@ -44,6 +44,7 @@ import {
   isValidWebUrl,
   maskTrackingUrl,
   matchExtractedPaperToExisting,
+  normalizeManuscriptNumber,
   normalizeSourceComparisonKey,
   remapHistoryIds,
   resolveStatusGroup,
@@ -1018,11 +1019,41 @@ export default function App() {
           };
         };
 
+        const findMatchedPaper = (extraction: ExtractionResponse, src: PaperSourceLink): ExtractedPaper | null => {
+          if (extraction.papers.length === 0) return null;
+          for (const candidate of extraction.papers) {
+            const m = matchExtractedPaperToExisting(
+              candidate,
+              [workingPaper],
+              src.url,
+              src.trackerSite,
+              rememberedIdentities
+            );
+            if (m.match?.id === workingPaper.id) {
+              return candidate;
+            }
+          }
+          if (extraction.papers.length === 1 && !src.sourceListUrl) {
+            const only = extraction.papers[0];
+            const candMs = normalizeManuscriptNumber(only.manuscriptNumber);
+            const workMs = normalizeManuscriptNumber(workingPaper.manuscriptNumber);
+            if (!candMs || !workMs || candMs === workMs) {
+              return only;
+            }
+          }
+          return null;
+        };
+
         for (const src of sourcesToRead) {
           const cacheKey = normalizeSourceComparisonKey(src.url, src.trackerSite);
+          const hints = {
+            manuscriptNumber: workingPaper.manuscriptNumber,
+            title: workingPaper.title,
+          };
+          const hadCachedCapture = Boolean(sessionCache?.captures.has(cacheKey));
           let capture = sessionCache?.captures.get(cacheKey);
           if (!capture) {
-            capture = await captureTrackerPageText(src.url);
+            capture = await captureTrackerPageText(src.url, 12000, hints);
             if (sessionCache) {
               sessionCache.captures.set(cacheKey, capture);
             }
@@ -1094,21 +1125,28 @@ export default function App() {
             continue;
           }
 
-          let matchedExt: ExtractedPaper | null = null;
-          if (extraction.papers.length === 1 && !src.sourceListUrl) {
-            matchedExt = extraction.papers[0];
-          } else {
-            for (const candidate of extraction.papers) {
-              const m = matchExtractedPaperToExisting(
-                candidate,
-                [workingPaper],
-                src.url,
-                src.trackerSite,
-                rememberedIdentities
-              );
-              if (m.match?.id === workingPaper.id) {
-                matchedExt = candidate;
-                break;
+          let capturedText = capture.text;
+          let matchedExt: ExtractedPaper | null = findMatchedPaper(extraction, src);
+
+          // If a cached portal tab didn't list this paper, ask the extension to check other open tabs for the same portal
+          if (!matchedExt && hadCachedCapture && !src.url.includes('/api/test-tracker/')) {
+            const altCapture = await captureTrackerPageText(src.url, 12000, hints);
+            if (altCapture.ok && altCapture.text && altCapture.text !== capturedText) {
+              const altText = altCapture.text;
+              const altExtraction = await extractPapersFromCapturedText({
+                pageText: altText,
+                sourceUrl: src.url,
+                pageTitle: altCapture.title,
+                provider: settings.aiProvider,
+              });
+              if (altExtraction.ok && altExtraction.pageState === 'ok') {
+                const altMatch = findMatchedPaper(altExtraction, src);
+                if (altMatch) {
+                  capture = altCapture;
+                  capturedText = altText;
+                  extraction = altExtraction;
+                  matchedExt = altMatch;
+                }
               }
             }
           }
@@ -1119,7 +1157,7 @@ export default function App() {
               'Not found',
               'Not in list, check page. Last saved data kept intact.',
               null,
-              capture.text
+              capturedText
             );
             continue;
           }
@@ -1127,7 +1165,7 @@ export default function App() {
           const { updated, transitionEntry, minorEntry } = applyExtractedUpdateToPaper(
             workingPaper,
             matchedExt,
-            capture.text,
+            capturedText,
             checkSource,
             src.url,
             src.trackerSite

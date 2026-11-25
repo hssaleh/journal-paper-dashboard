@@ -275,16 +275,16 @@ async function startServer() {
     }
 
     const url = sourceUrl || 'unknown';
+    const hasUsablePaper = (p: { currentStatus?: string | null; title?: string | null; manuscriptNumber?: string | null }) =>
+      Boolean(p.currentStatus && (p.title || p.manuscriptNumber)) ||
+      Boolean(p.title && p.manuscriptNumber);
+
     const localFallbackIfReady = () => {
       const localRes = extractWithLocalSmartReader(pageText, url, pageTitle);
-      const localUsable =
-        localRes.ok &&
-        (localRes.pageState !== 'ok' ||
-          (localRes.papers.length > 0 &&
-            localRes.papers.every(
-              (p) => Boolean(p.currentStatus) && (Boolean(p.title) || Boolean(p.manuscriptNumber))
-            )));
-      return localUsable ? localRes : null;
+      if (!localRes.ok) return null;
+      if (localRes.pageState !== 'ok') return localRes;
+      const usable = localRes.papers.filter(hasUsablePaper);
+      return usable.length > 0 ? { ...localRes, papers: usable } : null;
     };
 
     if (provider === 'gemini') {
@@ -321,10 +321,9 @@ async function startServer() {
     const localHighConfidence =
       localRes.ok &&
       (localRes.pageState !== 'ok' ||
-        (localRes.papers.length > 0 &&
-          localRes.papers.every(
-            (p) => Boolean(p.currentStatus) && (Boolean(p.title) || Boolean(p.manuscriptNumber))
-          )));
+        localRes.papers.some(
+          (p) => Boolean(p.currentStatus) && (Boolean(p.title) || Boolean(p.manuscriptNumber))
+        ));
 
     if (localHighConfidence) {
       return res.json(localRes);

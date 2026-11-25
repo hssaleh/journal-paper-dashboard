@@ -48,7 +48,16 @@ export function initExtensionBridge(
   return () => window.removeEventListener('message', handleMessage);
 }
 
-function readViaExtension(url: string, timeoutMs = 26000): Promise<PageCaptureResult> {
+export interface CaptureHints {
+  manuscriptNumber?: string | null;
+  title?: string | null;
+}
+
+function readViaExtension(
+  url: string,
+  timeoutMs = 26000,
+  hints?: CaptureHints
+): Promise<PageCaptureResult> {
   return new Promise((resolve) => {
     const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const timer = setTimeout(() => {
@@ -98,19 +107,27 @@ function readViaExtension(url: string, timeoutMs = 26000): Promise<PageCaptureRe
     }
 
     window.addEventListener('message', onMsg);
-    window.postMessage({ type: 'JPD_EXT_READ_URL', requestId, url }, window.location.origin);
+    window.postMessage(
+      { type: 'JPD_EXT_READ_URL', requestId, url, hints },
+      window.location.origin
+    );
   });
 }
 
 export async function captureTrackerPageText(
   rawUrl: string,
-  timeoutMs = 12000
+  timeoutMs = 12000,
+  hints?: CaptureHints
 ): Promise<PageCaptureResult> {
   // Always use the installed browser extension for external tracker portals when available
   // so it refreshes the already-open portal tab first without ever opening a new tab.
   const isLocalTest = rawUrl.includes('/api/test-tracker/');
   if (extensionDetected && !isLocalTest) {
-    const extResult = await readViaExtension(rawUrl, Math.max(timeoutMs + 14000, 26000));
+    const extResult = await readViaExtension(
+      rawUrl,
+      Math.max(timeoutMs + 14000, 26000),
+      hints
+    );
     if (extResult.ok) return extResult;
     if (extResult.code === 'TIMEOUT' || extResult.code === 'NO_OPEN_TAB') {
       return extResult;
@@ -142,10 +159,31 @@ export async function extractPapersFromCapturedText(params: {
   pageTitle?: string;
   provider?: string;
 }): Promise<ExtractionResponse> {
-  const res = await fetch('/api/extract', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(params),
-  });
-  return (await res.json()) as ExtractionResponse;
+  try {
+    const res = await fetch('/api/extract', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+    const raw = await res.text();
+    try {
+      return JSON.parse(raw) as ExtractionResponse;
+    } catch {
+      return {
+        ok: false,
+        pageState: 'ai_error',
+        papers: [],
+        error: `Extraction endpoint returned an unexpected response (HTTP ${res.status}).`,
+        technicalDetails: raw.slice(0, 300),
+      };
+    }
+  } catch (err) {
+    return {
+      ok: false,
+      pageState: 'ai_error',
+      papers: [],
+      error: 'Could not reach the page extraction service.',
+      technicalDetails: err instanceof Error ? err.message : String(err),
+    };
+  }
 }

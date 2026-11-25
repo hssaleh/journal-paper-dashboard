@@ -18,6 +18,20 @@ function isValidIsoDate(value: string | null | undefined): boolean {
   );
 }
 
+function coerceGeminiDate(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (!trimmed || /^(?:null|none|n\/a|na|unknown|not\s+shown|-+)$/i.test(trimmed)) return null;
+  const m = trimmed.match(/^(\d{4}-\d{2}-\d{2})(?:[T\s].*)?$/);
+  if (m && isValidIsoDate(m[1])) return m[1];
+  const parsed = Date.parse(trimmed);
+  if (!Number.isNaN(parsed)) {
+    const iso = new Date(parsed).toISOString().slice(0, 10);
+    if (isValidIsoDate(iso)) return iso;
+  }
+  return null;
+}
+
 function normalizeWhitespace(str: string): string {
   return str.replace(/\s+/g, ' ').trim().toLowerCase();
 }
@@ -97,9 +111,10 @@ ${boundedText}
   try {
     let response;
     const attempts: Array<{ model: string; useSchema: boolean }> = [
-      { model: 'gemini-4-hydrogen', useSchema: true },
+      { model: 'gemini-2.5-flash', useSchema: true },
+      { model: 'gemini-2.5-flash-lite', useSchema: true },
       { model: 'gemini-3.1-flash-lite', useSchema: true },
-      { model: 'gemini-3.1-flash-lite', useSchema: false },
+      { model: 'gemini-2.5-flash', useSchema: false },
     ];
     for (let i = 0; i < attempts.length; i++) {
       const { model: modelName, useSchema } = attempts[i];
@@ -191,11 +206,17 @@ ${boundedText}
           msg.includes('API_KEY_INVALID');
         const isTransient =
           !isQuotaOrAuth &&
-          (msg.includes('503') || msg.includes('UNAVAILABLE') || msg.includes('400'));
+          (msg.includes('503') ||
+            msg.includes('UNAVAILABLE') ||
+            msg.includes('400') ||
+            msg.includes('404') ||
+            msg.includes('NOT_FOUND') ||
+            msg.toLowerCase().includes('not found') ||
+            msg.toLowerCase().includes('not supported'));
         if (!isTransient || i === attempts.length - 1) {
           throw new Error(attemptErrors.join(' | '));
         }
-        await new Promise((r) => setTimeout(r, 900));
+        await new Promise((r) => setTimeout(r, 600));
       }
     }
 
@@ -241,50 +262,42 @@ ${boundedText}
     }
 
     const normalizedPage = normalizeWhitespace(cleanedText);
+    const normPageAlphaNum = normalizedPage.replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ');
 
-    // Strict validation per Spec Section 8.7:
-    // valid structure, valid dates, and status text appears on the page
     const validatedPapers: ExtractedPaper[] = [];
     for (const p of parsed.papers) {
-      if (!isValidIsoDate(p.submissionDate) || !isValidIsoDate(p.statusDate)) {
-        return {
-          ok: false,
-          pageState: 'ai_error',
-          papers: [],
-          error: 'AI returned an invalid date format; saved data was left untouched.',
-          technicalDetails: `Invalid date: sub=${p.submissionDate}, status=${p.statusDate}`,
-        };
-      }
+      const uncertainSet = new Set<string>(
+        Array.isArray(p.uncertainFields) ? p.uncertainFields : []
+      );
+      const safeSubDate = p.submissionDate ? coerceGeminiDate(p.submissionDate) : null;
+      const safeStatusDate = p.statusDate ? coerceGeminiDate(p.statusDate) : null;
+      if (p.submissionDate && !safeSubDate) uncertainSet.add('submissionDate');
+      if (p.statusDate && !safeStatusDate) uncertainSet.add('statusDate');
 
-      if (p.currentStatus) {
-        if (isLikelyDateString(p.currentStatus)) {
-          return {
-            ok: false,
-            pageState: 'ai_error',
-            papers: [],
-            error: 'AI matched a date instead of a status label; saved data was left untouched.',
-            technicalDetails: `Rejected date-like status: "${p.currentStatus}"`,
-          };
-        }
-        const normStatus = normalizeWhitespace(p.currentStatus);
-        const normPageAlphaNum = normalizedPage.replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ');
-        const normStatusAlphaNum = normStatus.replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
-        if (
-          normStatus.length > 0 &&
-          !normalizedPage.includes(normStatus) &&
-          !(normStatusAlphaNum && normPageAlphaNum.includes(normStatusAlphaNum))
-        ) {
-          return {
-            ok: false,
-            pageState: 'ai_error',
-            papers: [],
-            error: 'AI status text did not match the page text; saved data was left untouched.',
-            technicalDetails: `Unverified status: "${p.currentStatus}"`,
-          };
+      let safeStatus = p.currentStatus?.trim() || null;
+      if (safeStatus) {
+        if (isLikelyDateString(safeStatus)) {
+          safeStatus = null;
+          uncertainSet.add('currentStatus');
+        } else {
+          const normStatus = normalizeWhitespace(safeStatus);
+          const normStatusAlphaNum = normStatus
+            .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+          const inPage =
+            normalizedPage.includes(normStatus) ||
+            Boolean(normStatusAlphaNum && normPageAlphaNum.includes(normStatusAlphaNum));
+          if (!inPage) {
+            uncertainSet.add('currentStatus');
+          }
         }
       }
 
       const msNum = p.manuscriptNumber?.trim() || null;
+      const titleVal = p.title?.trim() || null;
+      if (!titleVal && !msNum && !safeStatus) continue;
+
       const rawJournal = p.journalName?.trim() || '';
       const resolvedJournal = !isBadOrGenericJournalName(rawJournal)
         ? rawJournal
@@ -297,19 +310,19 @@ ${boundedText}
 
       validatedPapers.push({
         journalName: resolvedJournal || null,
-        title: p.title?.trim() || null,
+        title: titleVal,
         manuscriptNumber: msNum,
         revision: p.revision?.trim() || null,
         submissionType: p.submissionType?.trim() || null,
-        submissionDate: p.submissionDate || null,
+        submissionDate: safeSubDate,
         submissionDateAmbiguous: Boolean(p.submissionDateAmbiguous),
-        currentStatus: p.currentStatus?.trim() || null,
-        statusDate: p.statusDate || null,
+        currentStatus: safeStatus,
+        statusDate: safeStatusDate,
         statusDateAmbiguous: Boolean(p.statusDateAmbiguous),
         editorOrTeam: p.editorOrTeam?.trim() || null,
         reviewCount: typeof p.reviewCount === 'number' ? p.reviewCount : null,
         decision: p.decision?.trim() || null,
-        uncertainFields: Array.isArray(p.uncertainFields) ? p.uncertainFields : [],
+        uncertainFields: Array.from(uncertainSet),
         pageEventHistory: Array.isArray(p.pageEventHistory) ? p.pageEventHistory : [],
       });
     }

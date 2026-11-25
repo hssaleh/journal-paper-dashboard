@@ -33,6 +33,30 @@ function normalizeWhitespace(str: string): string {
   return str.replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
+function coerceIsoDateValue(value: string | null | undefined): {
+  iso: string | null;
+  ambiguous: boolean;
+  invalid: boolean;
+} {
+  if (!value) return { iso: null, ambiguous: false, invalid: false };
+  const trimmed = value.trim();
+  if (
+    !trimmed ||
+    /^(?:null|none|n\/a|na|unknown|not\s+shown|not\s+available|-+)$/i.test(trimmed)
+  ) {
+    return { iso: null, ambiguous: false, invalid: false };
+  }
+  const isoPrefix = trimmed.match(/^(\d{4}-\d{2}-\d{2})(?:[T\s].*)?$/);
+  if (isoPrefix && isValidIsoDate(isoPrefix[1])) {
+    return { iso: isoPrefix[1], ambiguous: false, invalid: false };
+  }
+  const parsed = parseDateToken(trimmed);
+  if (parsed.iso) {
+    return { iso: parsed.iso, ambiguous: parsed.ambiguous, invalid: false };
+  }
+  return { iso: null, ambiguous: false, invalid: true };
+}
+
 export function validateExtractedResult(
   parsed: { pageState?: string; papers?: Partial<ExtractedPaper>[] },
   cleanedText: string,
@@ -44,7 +68,12 @@ export function validateExtractedResult(
   if (parsed.pageState === 'not_found') {
     return { ok: true, pageState: 'not_found', papers: [] };
   }
-  if (parsed.pageState === 'empty_or_unreadable' || !Array.isArray(parsed.papers)) {
+  const papersInput = Array.isArray(parsed.papers) ? parsed.papers : null;
+  if (
+    parsed.pageState === 'empty_or_unreadable' ||
+    !papersInput ||
+    papersInput.length === 0
+  ) {
     return {
       ok: false,
       pageState: 'ai_error',
@@ -55,48 +84,56 @@ export function validateExtractedResult(
   }
 
   const normalizedPage = normalizeWhitespace(cleanedText);
+  const normPageAlphaNum = normalizedPage.replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ');
   const validatedPapers: ExtractedPaper[] = [];
 
-  for (const p of parsed.papers) {
-    if (!isValidIsoDate(p.submissionDate) || !isValidIsoDate(p.statusDate)) {
-      return {
-        ok: false,
-        pageState: 'ai_error',
-        papers: [],
-        error: 'Extractor returned an invalid date format; saved data was left untouched.',
-        technicalDetails: `Invalid date: sub=${p.submissionDate}, status=${p.statusDate}`,
-      };
-    }
+  for (const p of papersInput) {
+    const subCoerced = coerceIsoDateValue(p.submissionDate);
+    const statusDateCoerced = coerceIsoDateValue(p.statusDate);
+    const uncertainSet = new Set<string>(
+      Array.isArray(p.uncertainFields) ? p.uncertainFields : []
+    );
 
-    if (p.currentStatus) {
-      if (isLikelyDateString(p.currentStatus)) {
-        return {
-          ok: false,
-          pageState: 'ai_error',
-          papers: [],
-          error: 'Extractor matched a date instead of a status label; saved data was left untouched.',
-          technicalDetails: `Rejected date-like status: "${p.currentStatus}"`,
-        };
-      }
-      const normStatus = normalizeWhitespace(p.currentStatus);
-      const normPageAlphaNum = normalizedPage.replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ');
-      const normStatusAlphaNum = normStatus.replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
-      if (
-        normStatus.length > 0 &&
-        !normalizedPage.includes(normStatus) &&
-        !(normStatusAlphaNum && normPageAlphaNum.includes(normStatusAlphaNum))
-      ) {
-        return {
-          ok: false,
-          pageState: 'ai_error',
-          papers: [],
-          error: 'Extracted status text did not match the page text; saved data was left untouched.',
-          technicalDetails: `Unverified status: "${p.currentStatus}"`,
-        };
+    if (subCoerced.invalid) uncertainSet.add('submissionDate');
+    if (statusDateCoerced.invalid) uncertainSet.add('statusDate');
+
+    let safeStatus = p.currentStatus?.trim() || null;
+    if (safeStatus) {
+      if (isLikelyDateString(safeStatus)) {
+        safeStatus = null;
+        uncertainSet.add('currentStatus');
+      } else {
+        const normStatus = normalizeWhitespace(safeStatus);
+        const normStatusAlphaNum = normStatus
+          .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+        const inPage =
+          normalizedPage.includes(normStatus) ||
+          Boolean(normStatusAlphaNum && normPageAlphaNum.includes(normStatusAlphaNum));
+        if (!inPage) {
+          // Check if a verbatim known status phrase appears on the page with shared keywords
+          const statusWords = normStatusAlphaNum.split(' ').filter((w) => w.length >= 3);
+          const matchingLinePhrase = KNOWN_STATUS_PHRASES.find((phrase) => {
+            const np = phrase.toLowerCase();
+            if (!normalizedPage.includes(np)) return false;
+            return statusWords.some((w) => np.includes(w));
+          });
+          if (matchingLinePhrase) {
+            safeStatus = matchingLinePhrase;
+          } else {
+            uncertainSet.add('currentStatus');
+          }
+        }
       }
     }
 
     const msNum = p.manuscriptNumber?.trim() || null;
+    const titleVal = p.title?.trim() || null;
+    if (!titleVal && !msNum && !safeStatus) {
+      continue;
+    }
+
     const rawJournal = p.journalName?.trim() || '';
     const resolvedJournal = !isBadOrGenericJournalName(rawJournal)
       ? rawJournal
@@ -109,19 +146,19 @@ export function validateExtractedResult(
 
     validatedPapers.push({
       journalName: resolvedJournal || null,
-      title: p.title?.trim() || null,
+      title: titleVal,
       manuscriptNumber: msNum,
       revision: p.revision?.trim() || null,
       submissionType: p.submissionType?.trim() || null,
-      submissionDate: p.submissionDate || null,
-      submissionDateAmbiguous: Boolean(p.submissionDateAmbiguous),
-      currentStatus: p.currentStatus?.trim() || null,
-      statusDate: p.statusDate || null,
-      statusDateAmbiguous: Boolean(p.statusDateAmbiguous),
+      submissionDate: subCoerced.iso,
+      submissionDateAmbiguous: Boolean(p.submissionDateAmbiguous) || subCoerced.ambiguous,
+      currentStatus: safeStatus,
+      statusDate: statusDateCoerced.iso,
+      statusDateAmbiguous: Boolean(p.statusDateAmbiguous) || statusDateCoerced.ambiguous,
       editorOrTeam: p.editorOrTeam?.trim() || null,
       reviewCount: typeof p.reviewCount === 'number' ? p.reviewCount : null,
       decision: p.decision?.trim() || null,
-      uncertainFields: Array.isArray(p.uncertainFields) ? p.uncertainFields : [],
+      uncertainFields: Array.from(uncertainSet),
       pageEventHistory: Array.isArray(p.pageEventHistory) ? p.pageEventHistory : [],
     });
   }
@@ -261,14 +298,17 @@ export async function extractWithPollinations(
 
     if (!res.ok) {
       const errBody = await res.text().catch(() => '');
-      if (res.status === 402 || res.status === 429) {
-        pollinationsCooldownUntil = Date.now() + 46000;
+      if (res.status === 402 || res.status === 429 || res.status === 503) {
+        const cooldownMs = res.status === 503 ? 16000 : 46000;
+        pollinationsCooldownUntil = Date.now() + cooldownMs;
         return {
           ok: false,
           pageState: 'ai_error',
           papers: [],
           error:
-            'Free Open AI cloud rate limit reached (1 request per 45s). Wait ~45s and retry, or copy the full table with headers and use Paste text. Saved data was left untouched.',
+            res.status === 503
+              ? 'Free Open AI cloud is temporarily busy (HTTP 503). Built-in Local Reader handles supported portals automatically.'
+              : 'Free Open AI cloud rate limit reached (1 request per 45s). Wait ~45s and retry, or copy the full table with headers and use Paste text. Saved data was left untouched.',
           technicalDetails: `HTTP ${res.status}: ${errBody.slice(0, 400)}`,
         };
       }
@@ -441,13 +481,17 @@ const KNOWN_STATUS_PHRASES = [
   'Technical Check',
   'Quality Check',
   'Initial Assessment',
+  'Under Editorial Assessment',
   'Editorial Assessment',
   'With Editor',
   'Editor Assigned',
   'Editor Invited',
   'Under Review',
+  'Out for Review',
+  'In Review',
   'Under Consideration',
   'Peer Review',
+  'Editorial Review',
   'Reviewers Invited',
   'Reviewers Assigned',
   'Awaiting Reviewer Selection',
@@ -461,21 +505,35 @@ const KNOWN_STATUS_PHRASES = [
   'Awaiting AE Recommendation',
   'Awaiting EIC Decision',
   'Awaiting Editor Decision',
+  'Awaiting Decision',
   'Decision in Process',
+  'Decision Pending',
   'Ready for Decision',
+  'Ready for Editor Decision',
   'Minor Revision Required',
   'Major Revision Required',
+  'Minor Revisions Required',
+  'Major Revisions Required',
   'Revision Requested',
   'Revise and Resubmit',
   'Minor Revision',
   'Major Revision',
+  'Minor Revisions',
+  'Major Revisions',
+  'Revision Submitted',
+  'Revised Manuscript Submitted',
+  'Sent Back to Author',
   'Revise',
   'Conditional Acceptance',
+  'Provisionally Accepted',
+  'Accept with Minor Revisions',
+  'Accept with Major Revisions',
   'Accepted',
   'Accept',
   'Ready for Production',
   'In Press',
   'In Production',
+  'Published',
   'Transfer Pending',
   'Rejected',
   'Declined',
@@ -530,7 +588,7 @@ function isActionBoilerplate(line: string): boolean {
 }
 
 const ACADEMIC_MS_REGEX =
-  /\b([A-Z]{2,12}-(?:[A-Z]-)?\d{2,4}-\d{3,6}(?:R\d+)?|[A-Z]{2,10}-\d{2,4}-\d{3,6})\b/;
+  /\b([A-Z]{2,12}-(?:[A-Z]-)?\d{2,4}-\d{2,7}(?:[\s._-]?R\d+)?|[A-Z]{2,10}-\d{2,4}-\d{2,7})\b/;
 
 export function extractWithLocalSmartReader(
   pageText: string,
@@ -757,6 +815,96 @@ export function extractWithLocalSmartReader(
       }
 
       if (papers.length > 0) {
+        // Also check --- PAGE TEXT --- for any additional manuscript IDs missed by DOM table extraction
+        const capturedMsSet = new Set(
+          papers
+            .map((p) => (p.manuscriptNumber || '').replace(/[\s._-]+R\d+$/i, '').toUpperCase())
+            .filter(Boolean)
+        );
+        const pageTextIdx = lines.indexOf('--- PAGE TEXT ---');
+        if (pageTextIdx !== -1) {
+          const extraLines = lines.slice(pageTextIdx + 1);
+          const missingMsIndices: Array<{ idx: number; msRaw: string }> = [];
+          for (let i = 0; i < extraLines.length; i++) {
+            const l = extraLines[i];
+            if (/^(page title:|journal banner:|source site|https?:\/\/)/i.test(l)) continue;
+            const m = l.match(ACADEMIC_MS_REGEX);
+            if (m) {
+              const norm = m[1].replace(/[\s._-]+R\d+$/i, '').toUpperCase();
+              if (!capturedMsSet.has(norm)) {
+                missingMsIndices.push({ idx: i, msRaw: m[1] });
+                capturedMsSet.add(norm);
+              }
+            }
+          }
+          for (let k = 0; k < missingMsIndices.length; k++) {
+            const start = missingMsIndices[k].idx;
+            const end =
+              k + 1 < missingMsIndices.length
+                ? missingMsIndices[k + 1].idx
+                : Math.min(extraLines.length, start + 14);
+            const block = extraLines.slice(start, end);
+            const { manuscriptNumber, revision } = splitManuscriptNumberAndRevision(
+              missingMsIndices[k].msRaw
+            );
+            let title: string | null = null;
+            let status: string | null = null;
+            const dates: Array<{ iso: string; ambiguous: boolean }> = [];
+            for (const bLine of block) {
+              if (bLine.includes(missingMsIndices[k].msRaw)) {
+                const remainder = bLine.replace(missingMsIndices[k].msRaw, '').trim();
+                if (remainder.length > 15 && !isActionBoilerplate(remainder) && !title) {
+                  title = remainder;
+                }
+                continue;
+              }
+              if (isActionBoilerplate(bLine)) continue;
+              if (isLikelyDateString(bLine)) {
+                const pd = parseDateToken(bLine);
+                if (pd.iso) dates.push({ iso: pd.iso, ambiguous: pd.ambiguous });
+                continue;
+              }
+              const matchedStatus = KNOWN_STATUS_PHRASES.find(
+                (p) => bLine.toLowerCase() === p.toLowerCase()
+              );
+              if (matchedStatus && !status) {
+                status = bLine;
+                continue;
+              }
+              if (!title && bLine.length >= 12) {
+                title = bLine;
+              } else if (!status && bLine.length >= 3 && bLine.length <= 60 && !isLikelyDateString(bLine)) {
+                status = bLine;
+              }
+            }
+            if (title || status || manuscriptNumber) {
+              const subDate = dates[0] || { iso: null, ambiguous: false };
+              const stDate = dates[1] || dates[0] || { iso: null, ambiguous: false };
+              papers.push({
+                journalName: resolveJournalNameFromHints({
+                  pageText: cleanedText,
+                  pageTitle,
+                  sourceUrl,
+                  manuscriptNumber,
+                }),
+                title,
+                manuscriptNumber,
+                revision,
+                submissionType: null,
+                submissionDate: subDate.iso,
+                submissionDateAmbiguous: subDate.ambiguous,
+                currentStatus: status,
+                statusDate: stDate.iso,
+                statusDateAmbiguous: stDate.ambiguous,
+                editorOrTeam: null,
+                reviewCount: null,
+                decision: null,
+                uncertainFields: [],
+                pageEventHistory: [],
+              });
+            }
+          }
+        }
         return validateExtractedResult({ pageState: 'ok', papers }, cleanedText, {
           sourceUrl,
           pageTitle,
@@ -766,16 +914,22 @@ export function extractWithLocalSmartReader(
   }
 
   // 2. Multi-row Editorial Manager / tracker copy WITHOUT pipes or tabs
-  // Detect multiple distinct manuscript IDs appearing on separate lines
+  // Detect distinct manuscript IDs appearing on separate lines
   const msLineIndices: Array<{ idx: number; msRaw: string }> = [];
+  const seenMsLineKeys = new Set<string>();
   for (let i = 0; i < lines.length; i++) {
+    if (/^(page title:|journal banner:|source site|https?:\/\/)/i.test(lines[i])) continue;
     const match = lines[i].match(ACADEMIC_MS_REGEX);
-    if (match && !lines[i].includes(':')) {
-      msLineIndices.push({ idx: i, msRaw: match[1] });
+    if (match && !/^(?:manuscript\s*(?:number|id)|submission\s*id|reference)\s*:/i.test(lines[i])) {
+      const norm = match[1].replace(/[\s._-]+R\d+$/i, '').toUpperCase();
+      if (!seenMsLineKeys.has(norm)) {
+        seenMsLineKeys.add(norm);
+        msLineIndices.push({ idx: i, msRaw: match[1] });
+      }
     }
   }
 
-  if (msLineIndices.length >= 2) {
+  if (msLineIndices.length >= 2 || (msLineIndices.length === 1 && hasAnyTableHeader)) {
     const blockPapers: ExtractedPaper[] = [];
     for (let k = 0; k < msLineIndices.length; k++) {
       const start = msLineIndices[k].idx;
@@ -876,7 +1030,7 @@ export function extractWithLocalSmartReader(
         if (m && m[1]) return m[1].trim();
 
         const spaceRe = new RegExp(`^${prefix}\\s+(.+)$`, 'i');
-        const exactLabelRe = new RegExp(`^${prefix}$`, 'i');
+        const exactLabelRe = new RegExp(`^${prefix}\\s*[:\\-]?$`, 'i');
         if (exactLabelRe.test(line) && i + 1 < lines.length && !lines[i + 1].includes(':')) {
           return lines[i + 1].trim();
         }
@@ -918,12 +1072,20 @@ export function extractWithLocalSmartReader(
     });
   }
 
-  let title = findField(['Article Title', 'Paper Title', 'Manuscript Title', 'Title', 'Heading 1']);
+  let title = findField([
+    'Article Title',
+    'Paper Title',
+    'Manuscript Title',
+    'Title',
+    'Heading 1',
+    'Heading 2',
+  ]);
+  const titleFoundExplicitly = Boolean(title);
   if (!title) {
     // AuthorHub / Research Square standalone heading line fallback
     const ignoredHeadingRe =
-      /^(page title:|journal banner:|heading 1:|submitted to |submitted on |published in |track your submission|track your accepted|need help|sign out|log out|privacy|cookie|terms|copyright|elsevier|authorhub|research square|editorial manager|corresponding author|review invitations|reviews completed|timeline|your submission|manuscript number|reference|last update)/i;
-    for (const line of lines.slice(0, 40)) {
+      /^(page title:|journal banner:|heading 1:|heading 2:|submitted to |submitted on |published in |track your submission|track your accepted|need help|sign out|log out|privacy|cookie|terms|copyright|elsevier|authorhub|research square|editorial manager|corresponding author|review invitations|reviews completed|timeline|your submission|manuscript number|reference|last update|loading|---)/i;
+    for (const line of lines.slice(0, 80)) {
       if (ignoredHeadingRe.test(line)) continue;
       if (line.startsWith('http://') || line.startsWith('https://')) continue;
       if (isLikelyDateString(line) || isActionBoilerplate(line)) continue;
@@ -931,7 +1093,7 @@ export function extractWithLocalSmartReader(
       if (KNOWN_STATUS_PHRASES.some((p) => line.toLowerCase() === p.toLowerCase())) continue;
       if (line.includes(':') && line.split(':')[0].length < 28) continue;
       const wordCount = line.split(/\s+/).length;
-      if (wordCount >= 4 && line.length >= 20 && line.length <= 280) {
+      if (wordCount >= 3 && line.length >= 15 && line.length <= 280) {
         title = line;
         break;
       }
@@ -992,14 +1154,18 @@ export function extractWithLocalSmartReader(
     'Status Date',
     'Date of Status',
     'Current Status Date',
+    'Last updated on',
     'Last updated',
     'Last update',
     'Updated on',
+    'Updated',
+    'Last activity',
+    'Activity date',
     'Most recent activity',
   ]);
   if (!statusDateRaw) {
     const inlineUpdate = cleanedText.match(
-      /(?:Last updated|Last update|Status updated|Updated on)\s*[:\-]?\s*([A-Za-z0-9,.\-\/\s]{6,25}\d{4})/i
+      /(?:Last updated|Last update|Status updated|Updated on|Updated|Last activity)\s*[:\-]?\s*([A-Za-z0-9,.\-\/\s]{6,25}\d{4})/i
     );
     if (inlineUpdate?.[1]) statusDateRaw = inlineUpdate[1];
   }
@@ -1023,13 +1189,18 @@ export function extractWithLocalSmartReader(
   if (subParsed.ambiguous) uncertainFields.push('submissionDate');
   if (stParsed.ambiguous) uncertainFields.push('statusDate');
 
-  if (!currentStatus && !title && !journalName) {
+  const hasTrackingSignals = Boolean(
+    currentStatus ||
+      manuscriptNumber ||
+      (title && (titleFoundExplicitly || subParsed.iso || stParsed.iso))
+  );
+  if (!hasTrackingSignals) {
     return {
       ok: false,
       pageState: 'ai_error',
       papers: [],
       error:
-        'Built-in Local Reader could not recognize fields on this page layout. Switch to Free Open AI in Settings or use Add by hand.',
+        'Built-in Local Reader could not recognize fields on this page layout. Switch to Smart Local + Free Open AI in Settings or use Add by hand.',
     };
   }
 

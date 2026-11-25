@@ -152,8 +152,21 @@ export function titlesMatchForMerge(
   if (na === nb) return true;
   const shorter = na.length <= nb.length ? na : nb;
   const longer = na.length > nb.length ? na : nb;
-  if (shorter.length >= 24 && longer.startsWith(shorter)) {
+  if (shorter.length >= 18 && longer.startsWith(shorter)) {
     return true;
+  }
+
+  // Word-overlap check for minor subtitle/punctuation/truncation differences across portals
+  const stopWords = new Set(['a', 'an', 'the', 'of', 'in', 'on', 'for', 'and', 'to', 'with', 'by', 'from']);
+  const wordsA = na.split(' ').filter((w) => w.length >= 3 && !stopWords.has(w));
+  const wordsB = nb.split(' ').filter((w) => w.length >= 3 && !stopWords.has(w));
+  if (wordsA.length >= 4 && wordsB.length >= 4) {
+    const setB = new Set(wordsB);
+    const shared = wordsA.filter((w) => setB.has(w)).length;
+    const minLen = Math.min(wordsA.length, wordsB.length);
+    if (shared / minLen >= 0.8) {
+      return true;
+    }
   }
   return false;
 }

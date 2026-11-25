@@ -28,7 +28,7 @@ export async function buildCrossBrowserExtensionZip(dashboardOrigin: string): Pr
   const manifest = {
     manifest_version: 3,
     name: 'Journal Paper Dashboard Companion',
-    version: '1.2.1',
+    version: '1.2.2',
     description:
       'Refreshes your open, signed-in journal tracker tabs (Editorial Manager, Elsevier AuthorHub, Research Square) in Edge, Chrome, and Firefox before reading page text. Never opens any tabs.',
     permissions: ['tabs', 'scripting', 'activeTab'],
@@ -108,69 +108,82 @@ async function reloadAndWaitForTab(tabId, timeoutMs = 18000) {
   });
 }
 
-function findMatchingOpenTab(allTabs, targetUrl) {
+function findAllMatchingOpenTabs(allTabs, targetUrl) {
   const normalizedTarget = targetUrl.split('#')[0];
   let parsedTarget = null;
   try {
     parsedTarget = new URL(targetUrl);
   } catch (_) {}
 
+  const seenIds = new Set();
+  const ordered = [];
+  const pushUnique = (list) => {
+    for (const t of list) {
+      if (t && t.id && !seenIds.has(t.id)) {
+        seenIds.add(t.id);
+        ordered.push(t);
+      }
+    }
+  };
+
   // 1. Exact URL match (without hash)
-  const exact = allTabs.find((t) => t.url && t.url.split('#')[0] === normalizedTarget);
-  if (exact) return exact;
+  pushUnique(allTabs.filter((t) => t.url && t.url.split('#')[0] === normalizedTarget));
 
   if (parsedTarget) {
     const targetUuid = parsedTarget.searchParams.get('uuid');
     // 2. Elsevier AuthorHub UUID match
     if (targetUuid) {
-      const uuidMatch = allTabs.find((t) => {
-        if (!t.url) return false;
-        try {
-          const u = new URL(t.url);
-          return u.hostname === parsedTarget.hostname && u.searchParams.get('uuid') === targetUuid;
-        } catch (_) {
-          return false;
-        }
-      });
-      if (uuidMatch) return uuidMatch;
-    }
-
-    // 3. Same Editorial Manager journal portal slug (e.g., editorialmanager.com/ref/)
-    if (parsedTarget.hostname.toLowerCase().includes('editorialmanager.com')) {
-      const targetSlug = parsedTarget.pathname.split('/').filter(Boolean)[0]?.toLowerCase();
-      if (targetSlug) {
-        const emMatch = allTabs.find((t) => {
+      pushUnique(
+        allTabs.filter((t) => {
           if (!t.url) return false;
           try {
             const u = new URL(t.url);
-            if (!u.hostname.toLowerCase().includes('editorialmanager.com')) return false;
-            const tabSlug = u.pathname.split('/').filter(Boolean)[0]?.toLowerCase();
-            return tabSlug === targetSlug;
+            return u.hostname === parsedTarget.hostname && u.searchParams.get('uuid') === targetUuid;
           } catch (_) {
             return false;
           }
-        });
-        if (emMatch) return emMatch;
+        })
+      );
+    }
+
+    // 3. Same Editorial Manager journal portal slug (e.g., editorialmanager.com/est/)
+    if (parsedTarget.hostname.toLowerCase().includes('editorialmanager.com')) {
+      const targetSlug = parsedTarget.pathname.split('/').filter(Boolean)[0]?.toLowerCase();
+      if (targetSlug) {
+        pushUnique(
+          allTabs.filter((t) => {
+            if (!t.url) return false;
+            try {
+              const u = new URL(t.url);
+              if (!u.hostname.toLowerCase().includes('editorialmanager.com')) return false;
+              const tabSlug = u.pathname.split('/').filter(Boolean)[0]?.toLowerCase();
+              return tabSlug === targetSlug;
+            } catch (_) {
+              return false;
+            }
+          })
+        );
       }
     }
 
     // 4. Same origin + pathname (when no conflicting uuid)
     if (!targetUuid) {
       const targetPath = (parsedTarget.origin + parsedTarget.pathname).replace(/\\/$/, '').toLowerCase();
-      const pathMatch = allTabs.find((t) => {
-        if (!t.url) return false;
-        try {
-          const u = new URL(t.url);
-          return (u.origin + u.pathname).replace(/\\/$/, '').toLowerCase() === targetPath;
-        } catch (_) {
-          return false;
-        }
-      });
-      if (pathMatch) return pathMatch;
+      pushUnique(
+        allTabs.filter((t) => {
+          if (!t.url) return false;
+          try {
+            const u = new URL(t.url);
+            return (u.origin + u.pathname).replace(/\\/$/, '').toLowerCase() === targetPath;
+          } catch (_) {
+            return false;
+          }
+        })
+      );
     }
   }
 
-  return null;
+  return ordered;
 }
 
 async function extractTextFromTab(tabId) {
@@ -218,6 +231,13 @@ async function extractTextFromTab(tabId) {
           parts.push('Heading 1: ' + h1Text);
         }
       }
+      const h2 = document.querySelector('h2');
+      if (h2 && h2.innerText) {
+        const h2Text = h2.innerText.replace(/\\s+/g, ' ').trim();
+        if (h2Text.length >= 8 && !/^(track your submission|authorhub|editorial manager|research square|submissions being processed|timeline|submission details)/i.test(h2Text)) {
+          parts.push('Heading 2: ' + h2Text);
+        }
+      }
 
       function collectDoc(doc, depth = 0) {
         if (!doc || depth > 3) return;
@@ -228,14 +248,20 @@ async function extractTextFromTab(tabId) {
             if (rows.length < 2) return;
             const tableLines = [];
             rows.forEach((tr) => {
-              // Skip outer layout wrapper rows that hold another multi-row table,
-              // but keep manuscript rows that merely contain a small 1-row inline action/badge table.
-              const hasMultiRowNestedTable = Array.from(tr.querySelectorAll('table')).some(
-                (inner) => inner.querySelectorAll('tr').length > 1
-              );
-              if (hasMultiRowNestedTable) return;
+              // Skip outer layout wrapper rows that hold another multi-row DATA table,
+              // but keep manuscript rows whose Action cell contains a small 1-2 col helper table.
+              const hasMultiRowDataNestedTable = Array.from(tr.querySelectorAll('table')).some((inner) => {
+                const innerRows = inner.querySelectorAll('tr');
+                if (innerRows.length <= 1) return false;
+                const hasWideRow = Array.from(innerRows).some(
+                  (r) => Array.from(r.children).filter((c) => c.tagName === 'TD' || c.tagName === 'TH').length >= 3
+                );
+                const innerTxt = (inner.innerText || '').toLowerCase();
+                return hasWideRow || /manuscript\\s*number|current\\s*status|initial\\s*date/.test(innerTxt);
+              });
+              if (hasMultiRowDataNestedTable) return;
               const cells = Array.from(tr.children).filter((c) => c.tagName === 'TD' || c.tagName === 'TH');
-              if (cells.length >= 3) {
+              if (cells.length >= 2) {
                 const line = cells.map((c) => (c.innerText || c.textContent || '').replace(/\\s+/g, ' ').trim()).join(' | ');
                 if (line.replace(/[|\\s]/g, '').length > 0) tableLines.push(line);
               }
@@ -277,11 +303,41 @@ async function extractTextFromTab(tabId) {
   return results[0].result;
 }
 
-async function readTrackerUrl(targetUrl) {
-  const allTabs = await api.tabs.query({});
-  const existingTab = findMatchingOpenTab(allTabs, targetUrl);
+async function extractAfterSpaSettle(tabId) {
+  let data = await extractTextFromTab(tabId);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const bodyOnly = (data.text || '').split('--- PAGE TEXT ---')[1] || data.text || '';
+    const trimmedBody = bodyOnly.trim();
+    const stillLoading =
+      trimmedBody.length < 180 ||
+      /^(?:loading|please wait|fetching)/i.test(trimmedBody);
+    if (!stillLoading) break;
+    await sleep(900);
+    data = await extractTextFromTab(tabId);
+  }
+  return data;
+}
 
-  if (!existingTab || !existingTab.id) {
+function textMatchesHints(text, hints) {
+  if (!hints || !text) return false;
+  const lowerText = text.toLowerCase();
+  if (hints.manuscriptNumber) {
+    const cleanMs = String(hints.manuscriptNumber).trim().toLowerCase();
+    const baseMs = cleanMs.replace(/[\\s._-]+r\\d+$/i, '');
+    if (baseMs.length >= 5 && lowerText.includes(baseMs)) return true;
+  }
+  if (hints.title) {
+    const cleanTitle = String(hints.title).replace(/\\.{3,}$/, '').trim().toLowerCase();
+    if (cleanTitle.length >= 16 && lowerText.includes(cleanTitle.slice(0, 28))) return true;
+  }
+  return false;
+}
+
+async function readTrackerUrl(targetUrl, hints) {
+  const allTabs = await api.tabs.query({});
+  const candidateTabs = findAllMatchingOpenTabs(allTabs, targetUrl);
+
+  if (candidateTabs.length === 0) {
     return {
       ok: false,
       noOpenTab: true,
@@ -289,23 +345,31 @@ async function readTrackerUrl(targetUrl) {
     };
   }
 
-  // Requirement 1 & 3: Always refresh the already-open portal tab before reading, never open a new tab
-  await reloadAndWaitForTab(existingTab.id, 18000);
-  await sleep(1600);
-  const data = await extractTextFromTab(existingTab.id);
-  return { ok: true, usedExistingTab: true, reloadedBeforeRead: true, ...data };
+  let fallbackData = null;
+  for (let i = 0; i < candidateTabs.length; i++) {
+    const tab = candidateTabs[i];
+    await reloadAndWaitForTab(tab.id, 18000);
+    await sleep(1600);
+    const data = await extractAfterSpaSettle(tab.id);
+    if (!fallbackData) fallbackData = data;
+    if (candidateTabs.length === 1 || !hints || (!hints.manuscriptNumber && !hints.title) || textMatchesHints(data.text, hints)) {
+      return { ok: true, usedExistingTab: true, reloadedBeforeRead: true, ...data };
+    }
+  }
+
+  return { ok: true, usedExistingTab: true, reloadedBeforeRead: true, ...fallbackData };
 }
 
 api.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || !message.type) return;
 
   if (message.type === 'JPD_PING') {
-    sendResponse({ ok: true, version: '1.2.1' });
+    sendResponse({ ok: true, version: '1.2.2' });
     return true;
   }
 
   if (message.type === 'JPD_READ_URL') {
-    readTrackerUrl(message.url)
+    readTrackerUrl(message.url, message.hints)
       .then((res) => sendResponse(res))
       .catch((err) => sendResponse({ ok: false, error: err?.message || String(err) }));
     return true;
@@ -329,7 +393,7 @@ api.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   const dashboardBridgeJs = `const api = typeof browser !== 'undefined' ? browser : chrome;
 
-window.postMessage({ type: 'JPD_EXTENSION_READY', version: '1.2.1' }, window.location.origin);
+window.postMessage({ type: 'JPD_EXTENSION_READY', version: '1.2.2' }, window.location.origin);
 
 api.runtime.onMessage.addListener((message) => {
   if (message && message.type === 'JPD_PUSH_TAB_CAPTURE' && message.payload) {
@@ -345,14 +409,14 @@ window.addEventListener('message', (event) => {
   if (msg.type === 'JPD_CHECK_EXTENSION') {
     api.runtime.sendMessage({ type: 'JPD_PING' }, (resp) => {
       window.postMessage(
-        { type: 'JPD_EXTENSION_READY', version: resp?.version || '1.2.1' },
+        { type: 'JPD_EXTENSION_READY', version: resp?.version || '1.2.2' },
         window.location.origin
       );
     });
   }
 
   if (msg.type === 'JPD_EXT_READ_URL') {
-    api.runtime.sendMessage({ type: 'JPD_READ_URL', url: msg.url }, (resp) => {
+    api.runtime.sendMessage({ type: 'JPD_READ_URL', url: msg.url, hints: msg.hints }, (resp) => {
       window.postMessage(
         {
           type: 'JPD_EXT_READ_URL_RESULT',

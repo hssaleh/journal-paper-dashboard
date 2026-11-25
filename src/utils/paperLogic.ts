@@ -563,12 +563,21 @@ export function matchExtractedPaperToExisting(
     if (titleMatches.length > 1) return { match: null, ambiguousCandidates: titleMatches };
   }
 
-  // Backup identity: exact URL match across any stored source link (when single-paper URL)
+  // Backup identity: exact URL match across any stored single-paper source link
+  const isDedicatedSinglePaperUrl = (raw: string) => {
+    try {
+      const u = new URL(raw);
+      return Boolean(u.searchParams.get('uuid')) || /\/article\//i.test(u.pathname);
+    } catch {
+      return false;
+    }
+  };
   const normUrl = normalizeSourceComparisonKey(sourceUrl, trackerSite);
   const urlMatches = existingPapers.filter((p) =>
     getPaperSources(p).some(
       (s) =>
-        normalizeSourceComparisonKey(s.url, s.trackerSite) === normUrl && !s.sourceListUrl
+        normalizeSourceComparisonKey(s.url, s.trackerSite) === normUrl &&
+        (!s.sourceListUrl || isDedicatedSinglePaperUrl(s.url))
     )
   );
   if (urlMatches.length === 1) {
