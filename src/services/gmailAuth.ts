@@ -6,7 +6,7 @@ import {
   onAuthStateChanged,
   type User,
 } from 'firebase/auth';
-import firebaseConfig from '../../firebase-applet-config.json';
+import { firebaseConfig } from './firebaseConfigFallback';
 
 const app = getApps().length ? getApps()[0] : initializeApp(firebaseConfig);
 const auth = getAuth(app);
