@@ -28,7 +28,7 @@ export async function buildCrossBrowserExtensionZip(dashboardOrigin: string): Pr
   const manifest = {
     manifest_version: 3,
     name: 'Journal Paper Dashboard Companion',
-    version: '1.2.3',
+    version: '1.2.4',
     description:
       'Refreshes your open, signed-in journal tracker tabs (Editorial Manager, Elsevier AuthorHub, Research Square) in Edge, Chrome, and Firefox before reading page text. Never opens any tabs.',
     permissions: ['tabs', 'scripting', 'activeTab'],
@@ -309,18 +309,58 @@ async function extractTextFromTab(tabId) {
 
 async function extractAfterSpaSettle(tabId) {
   let data = await extractTextFromTab(tabId);
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const bodyOnly = (data.text || '').split('--- PAGE TEXT ---')[1] || data.text || '';
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const bodyOnly = (data.text || '').split('--- PAGE TEXT ---').slice(1).join('\\n') || data.text || '';
     const trimmedBody = bodyOnly.trim();
+    const meaningfulBody = trimmedBody
+      .replace(/we use cookies[\\s\\S]{0,600}/i, '')
+      .replace(/terms and conditions|privacy policy|cookie settings|copyright © elsevier.*/gi, '')
+      .trim();
+    const hasTrackingSignals =
+      /\\b[A-Z]{2,12}-(?:[A-Z]-)?\\d{2,4}-\\d{2,7}\\b/.test(data.text || '') ||
+      /\\b20\\d{2}\\b/.test(meaningfulBody) ||
+      /(under review|with editor|revision|decision|accepted|rejected|in review|reviews completed|reviewers invited|submissions being processed|author main menu|author login|username|sign in to your account)/i.test(
+        data.text || ''
+      );
     const stillLoading =
-      trimmedBody.length < 180 ||
-      (/^(?:loading|please wait|fetching)/i.test(trimmedBody) ||
-        (/\\bloading\\b|\\bfetching\\b/i.test(trimmedBody) && trimmedBody.length < 600));
+      meaningfulBody.length < 140 ||
+      !hasTrackingSignals ||
+      (/^(?:loading|please wait|fetching)/i.test(meaningfulBody) ||
+        (/\\bloading\\b|\\bfetching\\b/i.test(meaningfulBody) && meaningfulBody.length < 600));
     if (!stillLoading) break;
-    await sleep(900);
+    await sleep(800);
     data = await extractTextFromTab(tabId);
   }
   return data;
+}
+
+function hasManuscriptTableOrId(text) {
+  if (!text) return false;
+  return (
+    /\\b[A-Z]{2,12}-(?:[A-Z]-)?\\d{2,4}-\\d{2,7}\\b/.test(text) ||
+    (/manuscript\\s*number/i.test(text) && /current\\s*status/i.test(text))
+  );
+}
+
+function isAuthorMainMenuScreen(text) {
+  if (!text) return false;
+  const lower = text.toLowerCase();
+  return (
+    lower.includes('author main menu') &&
+    (lower.includes('submissions being processed') || lower.includes('submit new manuscript')) &&
+    !hasManuscriptTableOrId(text)
+  );
+}
+
+function isLoginScreenText(text) {
+  if (!text) return false;
+  const lower = text.toLowerCase();
+  return (
+    (lower.includes('username') && lower.includes('login')) ||
+    lower.includes('sign in to your account') ||
+    lower.includes('session has expired') ||
+    lower.includes('enter your email')
+  );
 }
 
 function textMatchesHints(text, hints) {
@@ -353,23 +393,44 @@ async function readTrackerUrl(targetUrl, hints) {
   let fallbackData = null;
   for (let i = 0; i < candidateTabs.length; i++) {
     const tab = candidateTabs[i];
+    let preReloadData = null;
+    if ((tab.url || targetUrl).toLowerCase().includes('editorialmanager.com')) {
+      try {
+        preReloadData = await extractTextFromTab(tab.id);
+      } catch (_) {}
+    }
+
     await reloadAndWaitForTab(tab.id, 18000);
     await sleep(1600);
-    const data = await extractAfterSpaSettle(tab.id);
-    if (!fallbackData) fallbackData = data;
+    let data = await extractAfterSpaSettle(tab.id);
+    let reloadedBeforeRead = true;
+
+    // Editorial Manager ASP.NET postback frames often keep the URL at .../default.aspx;
+    // a hard tabs.reload() can reset "Submissions Being Processed" back to "Author Main Menu".
+    if (
+      preReloadData &&
+      hasManuscriptTableOrId(preReloadData.text) &&
+      isAuthorMainMenuScreen(data.text) &&
+      !isLoginScreenText(data.text)
+    ) {
+      data = preReloadData;
+      reloadedBeforeRead = false;
+    }
+
+    if (!fallbackData) fallbackData = { ...data, reloadedBeforeRead };
     if (candidateTabs.length === 1 || !hints || (!hints.manuscriptNumber && !hints.title) || textMatchesHints(data.text, hints)) {
-      return { ok: true, usedExistingTab: true, reloadedBeforeRead: true, ...data };
+      return { ok: true, usedExistingTab: true, reloadedBeforeRead, ...data };
     }
   }
 
-  return { ok: true, usedExistingTab: true, reloadedBeforeRead: true, ...fallbackData };
+  return { ok: true, usedExistingTab: true, ...fallbackData };
 }
 
 api.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || !message.type) return;
 
   if (message.type === 'JPD_PING') {
-    sendResponse({ ok: true, version: '1.2.3' });
+    sendResponse({ ok: true, version: '1.2.4' });
     return true;
   }
 
@@ -398,13 +459,15 @@ api.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   const dashboardBridgeJs = `const api = typeof browser !== 'undefined' ? browser : chrome;
 
-window.postMessage({ type: 'JPD_EXTENSION_READY', version: '1.2.3' }, window.location.origin);
+window.postMessage({ type: 'JPD_EXTENSION_READY', version: '1.2.4' }, window.location.origin);
 
-api.runtime.onMessage.addListener((message) => {
-  if (message && message.type === 'JPD_PUSH_TAB_CAPTURE' && message.payload) {
-    window.postMessage({ type: 'JPD_PUSH_TAB_CAPTURE', payload: message.payload }, window.location.origin);
-  }
-});
+try {
+  api.runtime.onMessage.addListener((message) => {
+    if (message && message.type === 'JPD_PUSH_TAB_CAPTURE' && message.payload) {
+      window.postMessage({ type: 'JPD_PUSH_TAB_CAPTURE', payload: message.payload }, window.location.origin);
+    }
+  });
+} catch (_) {}
 
 window.addEventListener('message', (event) => {
   if (event.source !== window) return;
@@ -412,25 +475,53 @@ window.addEventListener('message', (event) => {
   if (!msg || !msg.type) return;
 
   if (msg.type === 'JPD_CHECK_EXTENSION') {
-    api.runtime.sendMessage({ type: 'JPD_PING' }, (resp) => {
-      window.postMessage(
-        { type: 'JPD_EXTENSION_READY', version: resp?.version || '1.2.2' },
-        window.location.origin
-      );
-    });
+    try {
+      if (!api?.runtime?.id) return;
+      api.runtime.sendMessage({ type: 'JPD_PING' }, (resp) => {
+        const lastErr = api.runtime?.lastError;
+        if (lastErr || !resp?.ok) return;
+        window.postMessage(
+          { type: 'JPD_EXTENSION_READY', version: resp.version || '1.2.4' },
+          window.location.origin
+        );
+      });
+    } catch (_) {}
   }
 
   if (msg.type === 'JPD_EXT_READ_URL') {
-    api.runtime.sendMessage({ type: 'JPD_READ_URL', url: msg.url, hints: msg.hints }, (resp) => {
+    try {
+      if (!api?.runtime?.id) {
+        window.postMessage(
+          {
+            type: 'JPD_EXT_READ_URL_RESULT',
+            requestId: msg.requestId,
+            result: { ok: false, error: 'Extension was reloaded — refresh this dashboard tab once to reconnect.' },
+          },
+          window.location.origin
+        );
+        return;
+      }
+      api.runtime.sendMessage({ type: 'JPD_READ_URL', url: msg.url, hints: msg.hints }, (resp) => {
+        const lastErr = api.runtime?.lastError?.message;
+        window.postMessage(
+          {
+            type: 'JPD_EXT_READ_URL_RESULT',
+            requestId: msg.requestId,
+            result: resp || { ok: false, error: lastErr || 'Extension communication error' },
+          },
+          window.location.origin
+        );
+      });
+    } catch (err) {
       window.postMessage(
         {
           type: 'JPD_EXT_READ_URL_RESULT',
           requestId: msg.requestId,
-          result: resp || { ok: false, error: api.runtime.lastError?.message || 'Extension communication error' },
+          result: { ok: false, error: 'Extension was reloaded — refresh this dashboard tab once to reconnect.' },
         },
         window.location.origin
       );
-    });
+    }
   }
 });
 `;

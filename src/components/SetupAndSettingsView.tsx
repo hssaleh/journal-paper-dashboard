@@ -183,10 +183,10 @@ export const SetupView: React.FC<SetupViewProps> = ({
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div>
             <h2 className="text-[18px] font-semibold text-slate-900 dark:text-slate-100">
-              Companion Browser Extension v1.2.3 (Edge, Chrome, Firefox)
+              Companion Browser Extension v1.2.4 (Edge, Chrome, Firefox)
             </h2>
             <p className="text-[14px] text-slate-600 dark:text-slate-400 mt-0.5">
-              Refreshes your already-open, signed-in portal tabs (Editorial Manager, Elsevier AuthorHub, Research Square) before reading text. Supports Render (<span className="font-mono">*.onrender.com</span>), local dev, and Cloud Run hosts. Never opens any browser tabs (including portal or dashboard tabs). Re-download &amp; reload if updating from v1.2.2 or earlier.
+              Refreshes your already-open, signed-in portal tabs (Editorial Manager, Elsevier AuthorHub, Research Square) before reading text while preserving ASP.NET frames and waiting for AuthorHub SPAs. Supports Render (<span className="font-mono">*.onrender.com</span>), local dev, and Cloud Run hosts. Never opens any browser tabs. Re-download &amp; reload if updating from v1.2.3 or earlier.
             </p>
           </div>
 

@@ -118,6 +118,36 @@ function readViaExtension(
   });
 }
 
+async function pingExtension(timeoutMs = 350): Promise<boolean> {
+  if (extensionDetected) return true;
+  if (typeof window === 'undefined') return false;
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      window.removeEventListener('message', onReady);
+      resolve(extensionDetected);
+    }, timeoutMs);
+
+    function onReady(event: MessageEvent) {
+      if (event.origin !== window.location.origin) return;
+      if (event.data?.type === 'JPD_EXTENSION_READY') {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        window.removeEventListener('message', onReady);
+        extensionDetected = true;
+        listeners.forEach((cb) => cb(true));
+        resolve(true);
+      }
+    }
+
+    window.addEventListener('message', onReady);
+    window.postMessage({ type: 'JPD_CHECK_EXTENSION' }, window.location.origin);
+  });
+}
+
 export async function captureTrackerPageText(
   rawUrl: string,
   timeoutMs = 12000,
@@ -126,7 +156,9 @@ export async function captureTrackerPageText(
   // Always use the installed browser extension for external tracker portals when available
   // so it refreshes the already-open portal tab first without ever opening a new tab.
   const isLocalTest = rawUrl.includes('/api/test-tracker/');
-  if (extensionDetected && !isLocalTest) {
+  const extReady = !isLocalTest ? await pingExtension(350) : false;
+
+  if (extReady && !isLocalTest) {
     const extResult = await readViaExtension(
       rawUrl,
       Math.max(timeoutMs + 23000, 35000),
@@ -134,6 +166,12 @@ export async function captureTrackerPageText(
     );
     if (extResult.ok) return extResult;
     if (extResult.code === 'TIMEOUT' || extResult.code === 'NO_OPEN_TAB') {
+      return extResult;
+    }
+    if (
+      extResult.error &&
+      /extension was reloaded|extension context invalidated/i.test(extResult.error)
+    ) {
       return extResult;
     }
   }
@@ -145,6 +183,18 @@ export async function captureTrackerPageText(
       body: JSON.stringify({ url: rawUrl, timeoutMs }),
     });
     const data = (await res.json()) as PageCaptureResult;
+    if (!data.ok && data.code === 'SIGN_IN_NEEDED' && !extReady && !isLocalTest) {
+      return {
+        ...data,
+        via: 'server',
+        technicalDetails: [
+          data.technicalDetails,
+          'Companion Extension was not connected on this dashboard tab (checked before fallback).',
+        ]
+          .filter(Boolean)
+          .join(' | '),
+      };
+    }
     return { ...data, via: 'server' };
   } catch (err) {
     return {

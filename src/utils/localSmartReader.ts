@@ -201,6 +201,12 @@ export const KNOWN_STATUS_PHRASES = [
   'In Production',
   'Published',
   'Transfer Pending',
+  'Peer Review in Progress',
+  'Sent to Editorial Office',
+  'Review Invitations Accepted',
+  'Ready for Review',
+  'Transfer to Another Journal',
+  'Published Online',
   'Rejected',
   'Declined',
   'Withdrawn',
@@ -663,23 +669,6 @@ export function extractWithLocalSmartReader(
   }
 
   const lower = cleanedText.toLowerCase();
-  if (
-    (lower.includes('session has expired') ||
-      lower.includes('sign in to your account') ||
-      lower.includes('author login') ||
-      lower.includes('log in to editorial manager') ||
-      lower.includes('you are not logged in')) &&
-    (lower.includes('password') ||
-      lower.includes('username') ||
-      lower.includes('forgot your login'))
-  ) {
-    return { ok: true, pageState: 'sign_in_needed', papers: [] };
-  }
-
-  if (lower.includes('404 not found') || lower.includes('page not found')) {
-    return { ok: true, pageState: 'not_found', papers: [] };
-  }
-
   const lines = cleanedText
     .split('\n')
     .map((l) => l.trim())
@@ -687,6 +676,85 @@ export function extractWithLocalSmartReader(
 
   const hasAnyTableHeader = lines.some((l) => isTableHeaderLine(l).isHeader);
   const hasManuscriptNumber = ACADEMIC_MS_REGEX.test(cleanedText);
+
+  const hasExplicitAuthPrompt =
+    (lower.includes('session has expired') ||
+      lower.includes('session timed out') ||
+      lower.includes('sign in to your account') ||
+      lower.includes('author login') ||
+      lower.includes('log in to editorial manager') ||
+      lower.includes('you are not logged in') ||
+      lower.includes('please log in') ||
+      lower.includes('log in again')) &&
+    (lower.includes('password') ||
+      lower.includes('username') ||
+      lower.includes('forgot your login') ||
+      lower.includes('email') ||
+      lower.includes('sign in'));
+
+  // Editorial Manager login page HTML (often shows Username + Role + Login + Update My Information without "password")
+  const isEmLoginPage =
+    !hasAnyTableHeader &&
+    !hasManuscriptNumber &&
+    lower.includes('editorial manager') &&
+    lower.includes('username') &&
+    (lower.includes('login') ||
+      lower.includes('forgot your login') ||
+      lower.includes('send login details'));
+
+  // Elsevier ID 2-step sign-in (step 1 shows email / institutional sign-in before password screen)
+  const isElsevierIdLogin =
+    !hasAnyTableHeader &&
+    !hasManuscriptNumber &&
+    lower.includes('elsevier') &&
+    (lower.includes('enter your email') ||
+      lower.includes('sign in to continue') ||
+      lower.includes('institutional sign in') ||
+      (lower.includes('sign in') && (lower.includes('create account') || lower.includes('id.elsevier.com'))));
+
+  // Cloudflare / Bot verification interstitial
+  const isBotWall =
+    !hasAnyTableHeader &&
+    !hasManuscriptNumber &&
+    ((lower.includes('checking your browser') && lower.includes('cloudflare')) ||
+      lower.includes('verify you are human') ||
+      lower.includes('enable javascript and cookies to continue'));
+
+  if (hasExplicitAuthPrompt || isEmLoginPage || isElsevierIdLogin || isBotWall) {
+    return {
+      ok: true,
+      pageState: 'sign_in_needed',
+      papers: [],
+      error:
+        'Sign-in needed. Open this portal in your browser with the Companion Extension connected, or use "Paste text".',
+    };
+  }
+
+  // Empty Elsevier AuthorHub Vue/cookie shell (HTTP 200 HTML without client-side XHR hydration)
+  const isAuthorHubContext =
+    lower.includes('track your submission') ||
+    lower.includes('track your accepted') ||
+    sourceUrl.toLowerCase().includes('authorhub.elsevier.com');
+  const hasCookieShell =
+    lower.includes('we use cookies') ||
+    (lower.includes('terms and conditions') && lower.includes('privacy policy'));
+  const hasAnyStatusOrDateSignal =
+    lines.some((l) => Boolean(matchStatusInLine(l))) || /\b20\d{2}\b/.test(cleanedText);
+
+  if (isAuthorHubContext && hasCookieShell && !hasManuscriptNumber && !hasAnyStatusOrDateSignal) {
+    return {
+      ok: true,
+      pageState: 'sign_in_needed',
+      papers: [],
+      error:
+        'AuthorHub details load inside your signed-in browser tab. Keep the AuthorHub tab open with the Companion Extension connected (or use "Paste text").',
+    };
+  }
+
+  if (lower.includes('404 not found') || lower.includes('page not found')) {
+    return { ok: true, pageState: 'not_found', papers: [] };
+  }
+
   if (
     !hasAnyTableHeader &&
     !hasManuscriptNumber &&
@@ -694,11 +762,11 @@ export function extractWithLocalSmartReader(
     (lower.includes('submissions being processed') || lower.includes('submit new manuscript'))
   ) {
     return {
-      ok: false,
-      pageState: 'ai_error',
+      ok: true,
+      pageState: 'sign_in_needed',
       papers: [],
       error:
-        'This tab is currently on the Editorial Manager Main Menu. Open "Submissions Being Processed" inside that portal tab, then refresh.',
+        'This tab is on the Editorial Manager Main Menu. Open "Submissions Being Processed" inside that portal tab, then refresh.',
       technicalDetails: 'Author Main Menu navigation screen detected without manuscript rows.',
     };
   }
@@ -829,6 +897,16 @@ export function extractWithLocalSmartReader(
         );
         if (status && isLikelyDateString(status)) {
           status = null;
+        }
+        if (!status) {
+          for (const cellVal of cells) {
+            if (!cellVal || cellVal.length > 90) continue;
+            const matchedCellStatus = matchStatusInLine(cellVal);
+            if (matchedCellStatus) {
+              status = matchedCellStatus;
+              break;
+            }
+          }
         }
 
         if (!title && !status && !manuscriptNumber) continue;

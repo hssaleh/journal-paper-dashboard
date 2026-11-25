@@ -1,20 +1,33 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
-</div>
+# Journal Paper Dashboard
 
-# Run and deploy your AI Studio app
+One-screen academic manuscript tracking dashboard for Editorial Manager, Elsevier AuthorHub, and Research Square, with offline local parsing, optional AI page reading, status-change alerts via Gmail, Excel/JSON export, and a cross-browser Companion Extension (Edge, Chrome, Firefox MV3).
 
-This contains everything you need to run your app locally.
+## Features
 
-View your app in AI Studio: https://ai.studio/apps/779c035e-ff9d-498f-ab2b-18f1940048d5
+- **Unified Manuscript Table**: Tracks multiple linked portals per paper (e.g., Editorial Manager + Elsevier AuthorHub + Research Square) in one row, counting as OK whenever any linked source works.
+- **Built-in Local Reader + AI Agents**: Instant offline deterministic parser (`localSmartReader`), plus optional Free Open AI (Pollinations), Local Ollama, and Gemini AI (`GEMINI_API_KEY`).
+- **Companion Extension (`v1.2.4`)**: Downloadable directly from **Setup & Extension** inside the running app. Refreshes open, signed-in portal tabs while preserving Editorial Manager ASP.NET postback tables and waiting for AuthorHub SPA hydration. Never opens new browser tabs.
+- **Data Safety & Export**: Preserves manually edited fields, tracks status-change history and unseen badges, supports JSON backup/merge import, and exports multi-sheet `.xlsx` workbooks.
 
-## Run Locally
+## Local Development
 
-**Prerequisites:**  Node.js
+```bash
+npm install
+cp .env.example .env
+npm run dev
+```
 
+The app runs on `http://localhost:3000`. Requires **Node.js >= 22.18.0** (for native TypeScript server execution via `node server.ts`).
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+## Deploy on Render (via GitHub)
+
+1. Push all repository files to GitHub (excluding `node_modules/`, `dist/`, `.env*`).
+2. In Render, create a **New Web Service** (or **New Blueprint** using `render.yaml`) connected to your GitHub repository:
+   - **Build Command**: `npm install && npm run build`
+   - **Start Command**: `npm start`
+   - **Health Check Path**: `/api/health`
+3. Optional Environment Variables in Render:
+   - `NODE_ENV=production`
+   - `APP_URL=https://<your-service>.onrender.com`
+   - `GEMINI_API_KEY` (only needed if selecting Gemini AI; default `Smart Local + Free Open AI` works with zero keys)
+   - `VITE_FIREBASE_*` (optional custom Firebase project for Gmail OAuth; add your Render domain to Firebase Authorized Domains)

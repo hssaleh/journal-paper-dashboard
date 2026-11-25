@@ -981,9 +981,15 @@ export default function App() {
           capturedText?: string
         ) => {
           const nowIso = new Date().toISOString();
+          const combinedTech = [
+            techDetails,
+            capturedText ? `Captured snippet: ${capturedText.replace(/\s+/g, ' ').slice(0, 320)}` : null,
+          ]
+            .filter(Boolean)
+            .join(' | ') || null;
           failureState.health = health;
           failureState.msg = message;
-          failureState.tech = techDetails || null;
+          failureState.tech = combinedTech;
 
           const currentSources = getPaperSources(workingPaper);
           const nextFailures = (src.consecutiveFailures ?? workingPaper.consecutiveFailures) + 1;
@@ -1003,10 +1009,10 @@ export default function App() {
                   lastCheckedAt: nowIso,
                   health,
                   healthMessage: message,
-                  healthTechnicalDetails: techDetails || null,
+                  healthTechnicalDetails: combinedTech,
                   consecutiveFailures: nextFailures,
                   nextRetryAt,
-                  lastSourceText: capturedText || item.lastSourceText,
+                  lastSourceText: item.lastSourceText || capturedText,
                 }
               : item
           );
@@ -1015,7 +1021,7 @@ export default function App() {
             ...workingPaper,
             sources: updatedSources,
             lastCheckedAt: nowIso,
-            lastSourceText: capturedText || workingPaper.lastSourceText,
+            lastSourceText: workingPaper.lastSourceText || capturedText || '',
           };
         };
 
@@ -1107,8 +1113,8 @@ export default function App() {
             recordSourceFailure(
               src,
               'Sign-in needed',
-              'Your session expired. Open the page and sign in again.',
-              null,
+              extraction.error || 'Your session expired. Open the page and sign in again.',
+              extraction.technicalDetails,
               capture.text
             );
             continue;
@@ -1204,6 +1210,8 @@ export default function App() {
             health: workingPaper.paused ? 'Paused' : 'OK',
             healthMessage: `A linked portal had an issue (${failureState.health}), while another linked source remains OK.`,
             healthTechnicalDetails: failureState.tech,
+            consecutiveFailures: 0,
+            nextRetryAt: null,
           };
         } else if (succeededCount < sourcesToRead.length) {
           workingPaper = {
@@ -1211,6 +1219,8 @@ export default function App() {
             health: workingPaper.paused ? 'Paused' : 'OK',
             healthMessage: `Updated ${succeededCount}/${sourcesToRead.length} linked portal(s). Another linked portal could not be read (${failureState.msg}).`,
             healthTechnicalDetails: failureState.tech,
+            consecutiveFailures: 0,
+            nextRetryAt: null,
           };
         }
 

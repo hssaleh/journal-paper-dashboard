@@ -1,7 +1,6 @@
 import 'dotenv/config';
 import express from 'express';
 import path from 'path';
-import { createServer as createViteServer } from 'vite';
 import { extractPapersFromPageText, stripSensitiveQueryParams } from './server/geminiExtractor.ts';
 import {
   extractWithLocalSmartReader,
@@ -226,6 +225,18 @@ async function startServer() {
       const html = await response.text();
       const { title, text } = htmlToReadableText(html);
 
+      const authOrShellCheck = extractWithLocalSmartReader(text, parsedUrl.toString(), title);
+      if (authOrShellCheck.ok && authOrShellCheck.pageState === 'sign_in_needed') {
+        return res.status(200).json({
+          ok: false,
+          code: 'SIGN_IN_NEEDED',
+          error:
+            authOrShellCheck.error ||
+            'Sign-in needed. Open this page in your browser profile with the Companion Extension connected, or use "Paste text".',
+          technicalDetails: `Unauthenticated login or JS SPA shell returned by ${parsedUrl.hostname} (HTTP ${response.status})`,
+        });
+      }
+
       return res.json({
         ok: true,
         title,
@@ -423,6 +434,7 @@ async function startServer() {
   });
 
   if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
